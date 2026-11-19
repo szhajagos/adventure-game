@@ -12,6 +12,8 @@ services:
       DB_NAME: ${DB_NAME:-adventure}
       DB_USER: ${DB_USER:-adventure}
       DB_PASS: ${DB_PASS:-adventure}
+      PLAYER_ID: ${PLAYER_ID:-1}
+      MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-localhost,127.0.0.1}
     depends_on:
       db:
         condition: service_healthy

@@ -1,0 +1,24 @@
+{
+    "name": "adventure-game/adventure-game",
+    "description": "AI-vezérelt szöveges kalandjáték MCP-szerverrel",
+    "type": "project",
+    "license": "proprietary",
+    "require": {
+        "php": ">=8.2",
+        "ext-pdo": "*",
+        "mcp/sdk": "^0.10",
+        "nyholm/psr7": "^1.8",
+        "laminas/laminas-httphandlerrunner": "^2.12"
+    },
+    "autoload": {
+        "psr-4": {
+            "AdventureGame\\": "src/"
+        }
+    },
+    "config": {
+        "allow-plugins": {
+            "php-http/discovery": false
+        },
+        "sort-packages": true
+    }
+}
