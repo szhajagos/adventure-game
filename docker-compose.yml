@@ -1,0 +1,46 @@
+name: adventure-game
+
+services:
+  web:
+    build: ./docker/php
+    ports:
+      - "${WEB_PORT:-8100}:80"
+    volumes:
+      - ./:/var/www/html
+    environment:
+      DB_HOST: db
+      DB_NAME: ${DB_NAME:-adventure}
+      DB_USER: ${DB_USER:-adventure}
+      DB_PASS: ${DB_PASS:-adventure}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: mariadb:11
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASS:-rootpass}
+      MARIADB_DATABASE: ${DB_NAME:-adventure}
+      MARIADB_USER: ${DB_USER:-adventure}
+      MARIADB_PASSWORD: ${DB_PASS:-adventure}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_hungarian_ci"]
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "${DB_PORT:-3307}:3306"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  adminer:
+    image: adminer
+    ports:
+      - "${ADMINER_PORT:-8101}:8080"
+    depends_on:
+      - db
+
+volumes:
+  db_data:
