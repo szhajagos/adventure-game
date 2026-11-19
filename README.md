@@ -15,7 +15,6 @@ docker compose up -d --build
 |---|---|
 | Játék (tesztoldal) | http://localhost:8100 |
 | Adminer (adatbázis-kezelő) | http://localhost:8101 – szerver: `db`, felhasználó/jelszó: `adventure` / `adventure` |
-| MariaDB kívülről | `localhost:3307` |
 
 A portok és jelszavak a `.env.example` alapján egy `.env` fájlban módosíthatók.
 

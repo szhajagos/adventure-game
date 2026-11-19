@@ -4,7 +4,9 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends git unzip \
  && rm -rf /var/lib/apt/lists/* \
  && docker-php-ext-install pdo_mysql \
- && a2enmod rewrite
+ && a2enmod rewrite \
+ && echo 'ServerName localhost' > /etc/apache2/conf-available/servername.conf \
+ && a2enconf servername
 
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
