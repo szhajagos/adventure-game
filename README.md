@@ -37,7 +37,7 @@ Adatbázis nullázása (az init SQL újrafut): `docker compose down -v`
 
 ## MCP-szerver
 
-Végpont: `http://localhost:8100/mcp.php`
+Végpont: `http://localhost:8100/mcp` (ugyanaz: `http://localhost:8100/mcp.php`)
 
 Eszközök (tools):
 
@@ -54,4 +54,21 @@ Tesztelés MCP Inspectorral (Node.js kell hozzá):
 npx @modelcontextprotocol/inspector
 ```
 
-A megnyíló felületen: Transport Type = **Streamable HTTP**, URL = `http://localhost:8100/mcp.php`, majd **Connect**.
+A megnyíló felületen: Transport Type = **Streamable HTTP**, URL = `http://localhost:8100/mcp`.
+Vagy közvetlenül: `npx @modelcontextprotocol/inspector --server-url http://localhost:8100/mcp`
+
+## Játék a saját Claude-ból (Cloudflare-alagúttal)
+
+```bash
+docker compose --profile tunnel up -d
+docker compose logs cloudflared
+```
+
+A naplóban megjelenik egy `https://valami-nev.trycloudflare.com` cím. A Claude-ban
+(Beállítások → Connectors → Add custom connector) ezt add meg, a végére `/mcp`-vel:
+`https://valami-nev.trycloudflare.com/mcp`
+
+Az alagút címe minden indításkor új. Leállítás: `docker compose stop cloudflared`
+
+Figyelem: amíg az alagút fut, a cím ismeretében bárki elérheti a tesztjátékost
+(bejelentkezés még nincs). Ha nem játszol, állítsd le.
