@@ -18,9 +18,19 @@ return [
     'DB_USER' => 'felhasznalo',
     'DB_PASS' => 'jelszo',
 
+    // A játék nyilvános címe (a képek URL-jéhez). Üresen hagyva a kérés címéből számolja.
+    'APP_URL' => 'https://play.mcpadventure.com',
+
     // Az MCP-végpontot elérő host-nevek, vesszővel elválasztva – a domained
-    'MCP_ALLOWED_HOSTS' => 'kalandjatek.hu,www.kalandjatek.hu',
+    'MCP_ALLOWED_HOSTS' => 'play.mcpadventure.com',
+
+    // Tesztidőszaki védelem: titkos kulcs az MCP-címben → https://play.mcpadventure.com/mcp/<kulcs>
+    // Csak betűk, számok, kötőjel és aláhúzás. Üresen hagyva nincs védelem (csak helyi fejlesztéshez!).
+    'MCP_ACCESS_KEY' => '',
 
     // Prototípus: melyik játékos nevében fut az MCP-szerver
     'PLAYER_ID' => '1',
+
+    // Hibák részletes kiírása a tesztoldalon (élesben maradjon '0')
+    'APP_DEBUG' => '0',
 ];

@@ -11,91 +11,181 @@ use RuntimeException;
  * A játékmotor: itt dől el, mi történik ténylegesen.
  * Az AI csak meghívja ezeket a műveleteket, és elmeséli az eredményt –
  * a játék állapotát (pénz, helyszín, éhség…) kizárólag ez az osztály módosítja.
+ *
+ * Egy szerveren több játék (világ) futhat. Minden játékosnak játékonként
+ * külön mentése van, és mindig az „aktuális” játékában lép.
  */
 final class GameEngine
 {
-    /** A kezdőállapot, amire az új játék visszaállít. */
-    private const START = [
-        'location_id' => 'park_pad',
-        'money'       => 340,
-        'hunger'      => 45,
-        'fatigue'     => 35,
-        'health'      => 90,
-        'game_minute' => 390, // 1. nap, 6:30
-    ];
-
-    public function __construct(private readonly PDO $db)
-    {
-    }
+    private const IMAGE_EXTENSIONS = ['webp', 'jpg', 'jpeg', 'png'];
 
     /**
-     * Körülnézés az aktuális helyszínen.
+     * @param string|null $imageDir  a helyszínképek mappája a szerveren (assets/images)
+     * @param string|null $imageUrl  ugyanennek a mappának a nyilvános címe (https://…/assets/images)
      */
-    public function look(int $playerId): array
+    public function __construct(
+        private readonly PDO $db,
+        private readonly ?string $imageDir = null,
+        private readonly ?string $imageUrl = null,
+    ) {
+    }
+
+    // =====================================================================
+    //  Játékválasztás
+    // =====================================================================
+
+    /**
+     * Az elérhető játékok listája, a játékos saját állásával.
+     */
+    public function listGames(int $playerId): array
     {
         $player = $this->player($playerId);
 
+        $stmt = $this->db->prepare(
+            'SELECT g.id, g.title, g.description, s.location_id, s.game_minute, s.updated_at, l.name AS location_name
+             FROM games g
+             LEFT JOIN saves s ON s.game_id = g.id AND s.player_id = ?
+             LEFT JOIN locations l ON l.game_id = s.game_id AND l.id = s.location_id
+             WHERE g.active = 1
+             ORDER BY g.sort_order, g.title'
+        );
+        $stmt->execute([$playerId]);
+
+        $games = array_map(fn (array $g) => [
+            'id'         => $g['id'],
+            'cim'        => $g['title'],
+            'leiras'     => $g['description'],
+            'aktualis'   => $g['id'] === $player['current_game_id'],
+            'sajat_allas' => $g['location_id'] === null ? null : [
+                'helyszin'  => $g['location_name'],
+                'ido'       => self::formatTime((int) $g['game_minute']),
+                'utoljara'  => $g['updated_at'],
+            ],
+        ], $stmt->fetchAll());
+
         return [
-            'siker'    => true,
-            'helyszin' => $this->describeLocation($player['location_id']),
-            'ido'      => self::formatTime((int) $player['game_minute']),
+            'siker'   => true,
+            'jatekok' => $games,
+            'tipp'    => 'A játékos a jatek_inditasa eszközzel választhat. Ha van saját állása, ott folytatja.',
         ];
     }
 
     /**
-     * Mozgás a megadott irányba.
+     * Játék kiválasztása: ha már van állása, ott folytatja, ha nincs, új mentés indul.
      */
+    public function startGame(int $playerId, string $query): array
+    {
+        $this->player($playerId);
+        $game = $this->findGame($query);
+
+        if ($game === null) {
+            return [
+                'siker'   => false,
+                'esemeny' => sprintf('Nincs ilyen játék: „%s”.', $query),
+                'jatekok' => array_map(
+                    fn (array $g) => ['id' => $g['id'], 'cim' => $g['cim']],
+                    $this->listGames($playerId)['jatekok']
+                ),
+            ];
+        }
+
+        $isNew = $this->save($playerId, $game['id']) === null;
+        if ($isNew) {
+            $this->createSave($playerId, $game);
+        }
+
+        $this->db->prepare('UPDATE players SET current_game_id = ? WHERE id = ?')->execute([$game['id'], $playerId]);
+        $save = $this->save($playerId, $game['id']);
+
+        return [
+            'siker'          => true,
+            'esemeny'        => $isNew
+                ? 'Új játék kezdődött. Meséld el a bevezetőt, majd a helyszínt.'
+                : 'A játékos folytatja a korábbi állását ebben a játékban.',
+            'jatek'          => $this->gameInfo($game),
+            'bevezeto'       => $isNew ? $game['intro'] : null,
+            'helyszin'       => $this->describeLocation($game['id'], $save['location_id']),
+            'ido'            => self::formatTime((int) $save['game_minute']),
+            'panel'          => $this->panel($playerId, $game),
+        ];
+    }
+
+    // =====================================================================
+    //  Játékműveletek (mindig az aktuális játékban)
+    // =====================================================================
+
+    public function look(int $playerId): array
+    {
+        [$game, $save] = $this->current($playerId);
+        if ($game === null) {
+            return $this->noGameSelected($playerId);
+        }
+
+        return [
+            'siker'    => true,
+            'jatek'    => $this->gameInfo($game),
+            'helyszin' => $this->describeLocation($game['id'], $save['location_id']),
+            'ido'      => self::formatTime((int) $save['game_minute']),
+            'panel'    => $this->panel($playerId, $game),
+        ];
+    }
+
     public function move(int $playerId, string $direction): array
     {
-        $player = $this->player($playerId);
-        $dir = Direction::normalize($direction);
+        [$game, $save] = $this->current($playerId);
+        if ($game === null) {
+            return $this->noGameSelected($playerId);
+        }
 
-        $stmt = $this->db->prepare('SELECT * FROM exits WHERE from_location = ? AND direction = ?');
-        $stmt->execute([$player['location_id'], $dir]);
+        $dir = Direction::normalize($direction);
+        $stmt = $this->db->prepare('SELECT * FROM exits WHERE game_id = ? AND from_location = ? AND direction = ?');
+        $stmt->execute([$game['id'], $save['location_id'], $dir]);
         $exit = $stmt->fetch();
 
         if (!$exit) {
             return [
-                'siker'          => false,
-                'esemeny'        => sprintf('Arra (%s) nem lehet menni innen.', $direction),
-                'lehetseges_iranyok' => $this->exitDirections($player['location_id']),
+                'siker'              => false,
+                'esemeny'            => sprintf('Arra (%s) nem lehet menni innen.', $direction),
+                'lehetseges_iranyok' => $this->exitDirections($game['id'], $save['location_id']),
             ];
         }
 
         $minutes = (int) $exit['minutes'];
-        $hunger  = self::clamp((int) $player['hunger'] + (int) ceil($minutes / 2));
-        $fatigue = self::clamp((int) $player['fatigue'] + (int) ceil($minutes / 3));
-        $time    = (int) $player['game_minute'] + $minutes;
+        $hunger  = self::clamp((int) $save['hunger'] + (int) ceil($minutes / 2));
+        $fatigue = self::clamp((int) $save['fatigue'] + (int) ceil($minutes / 3));
+        $time    = (int) $save['game_minute'] + $minutes;
 
         $this->db->prepare(
-            'UPDATE players SET location_id = ?, hunger = ?, fatigue = ?, game_minute = ? WHERE id = ?'
-        )->execute([$exit['to_location'], $hunger, $fatigue, $time, $playerId]);
+            'UPDATE saves SET location_id = ?, hunger = ?, fatigue = ?, game_minute = ? WHERE player_id = ? AND game_id = ?'
+        )->execute([$exit['to_location'], $hunger, $fatigue, $time, $playerId, $game['id']]);
 
         return [
-            'siker'    => true,
-            'esemeny'  => sprintf('A játékos %s irányba indult (%s), az út %d percig tartott.',
+            'siker'      => true,
+            'esemeny'    => sprintf('A játékos %s irányba indult (%s), az út %d percig tartott.',
                 Direction::label($dir), $exit['description'] ?? 'tovább', $minutes),
             'valtozasok' => [
-                'ehseg'    => [(int) $player['hunger'], $hunger],
-                'faradtsag' => [(int) $player['fatigue'], $fatigue],
+                'ehseg'     => [(int) $save['hunger'], $hunger],
+                'faradtsag' => [(int) $save['fatigue'], $fatigue],
             ],
-            'helyszin' => $this->describeLocation($exit['to_location']),
-            'ido'      => self::formatTime($time),
+            'helyszin'   => $this->describeLocation($game['id'], $exit['to_location']),
+            'ido'        => self::formatTime($time),
+            'panel'      => $this->panel($playerId, $game),
         ];
     }
 
-    /**
-     * A játékos állapota és leltára.
-     */
     public function status(int $playerId): array
     {
-        $p = $this->player($playerId);
+        [$game, $save] = $this->current($playerId);
+        if ($game === null) {
+            return $this->noGameSelected($playerId);
+        }
 
         $stmt = $this->db->prepare(
-            'SELECT i.name, pi.quantity FROM player_items pi JOIN items i ON i.id = pi.item_id
-             WHERE pi.player_id = ? ORDER BY i.name'
+            'SELECT i.name, si.quantity FROM save_items si
+             JOIN items i ON i.game_id = si.game_id AND i.id = si.item_id
+             WHERE si.player_id = ? AND si.game_id = ? ORDER BY i.name'
         );
-        $stmt->execute([$playerId]);
+        $stmt->execute([$playerId, $game['id']]);
         $inventory = array_map(
             fn (array $r) => ['nev' => $r['name'], 'darab' => (int) $r['quantity']],
             $stmt->fetchAll()
@@ -103,38 +193,45 @@ final class GameEngine
 
         return [
             'siker'     => true,
-            'nev'       => $p['name'],
-            'helyszin'  => $this->locationName($p['location_id']),
-            'ido'       => self::formatTime((int) $p['game_minute']),
-            'penz_ft'   => (int) $p['money'],
-            'ehseg'     => ['ertek' => (int) $p['hunger'], 'szoveg' => self::hungerLabel((int) $p['hunger'])],
-            'faradtsag' => ['ertek' => (int) $p['fatigue'], 'szoveg' => self::fatigueLabel((int) $p['fatigue'])],
-            'egeszseg'  => (int) $p['health'],
+            'jatek'     => $game['title'],
+            'helyszin'  => $this->locationName($game['id'], $save['location_id']),
+            'ido'       => self::formatTime((int) $save['game_minute']),
+            'penz'      => ['osszeg' => (int) $save['money'], 'egyseg' => $game['money_label']],
+            'ehseg'     => ['ertek' => (int) $save['hunger'], 'szoveg' => self::hungerLabel((int) $save['hunger'])],
+            'faradtsag' => ['ertek' => (int) $save['fatigue'], 'szoveg' => self::fatigueLabel((int) $save['fatigue'])],
+            'egeszseg'  => (int) $save['health'],
             'leltar'    => $inventory,
+            'panel'     => $this->panel($playerId, $game),
         ];
     }
 
     /**
-     * Új játék: a játékos visszakerül a kezdőállapotba.
+     * Az aktuális játék újrakezdése: a mentés visszaáll a játék kezdőállapotára.
      */
-    public function newGame(int $playerId): array
+    public function restart(int $playerId): array
     {
-        $this->player($playerId); // létezik-e
+        [$game] = $this->current($playerId);
+        if ($game === null) {
+            return $this->noGameSelected($playerId);
+        }
 
-        $this->db->prepare(
-            'UPDATE players SET location_id = ?, money = ?, hunger = ?, fatigue = ?, health = ?, game_minute = ? WHERE id = ?'
-        )->execute([...array_values(self::START), $playerId]);
-        $this->db->prepare('DELETE FROM player_items WHERE player_id = ?')->execute([$playerId]);
+        $this->db->prepare('DELETE FROM saves WHERE player_id = ? AND game_id = ?')->execute([$playerId, $game['id']]);
+        $this->createSave($playerId, $game);
 
         return [
             'siker'    => true,
-            'esemeny'  => 'Új játék kezdődött. A játékos most ébred fel, nem emlékszik, hogyan került ide.',
-            'helyszin' => $this->describeLocation(self::START['location_id']),
-            'ido'      => self::formatTime(self::START['game_minute']),
+            'esemeny'  => 'A játék elölről kezdődött. Meséld el a bevezetőt, majd a helyszínt.',
+            'jatek'    => $this->gameInfo($game),
+            'bevezeto' => $game['intro'],
+            'helyszin' => $this->describeLocation($game['id'], $game['start_location']),
+            'ido'      => self::formatTime((int) $game['start_minute']),
+            'panel'    => $this->panel($playerId, $game),
         ];
     }
 
-    // --- belső segédfüggvények -------------------------------------------
+    // =====================================================================
+    //  Belső segédfüggvények
+    // =====================================================================
 
     private function player(int $playerId): array
     {
@@ -149,18 +246,99 @@ final class GameEngine
         return $player;
     }
 
-    private function describeLocation(string $locationId): array
+    /** @return array{0: ?array, 1: ?array} az aktuális játék és a hozzá tartozó mentés */
+    private function current(int $playerId): array
     {
-        $stmt = $this->db->prepare('SELECT * FROM locations WHERE id = ?');
-        $stmt->execute([$locationId]);
+        $player = $this->player($playerId);
+        if ($player['current_game_id'] === null) {
+            return [null, null];
+        }
+
+        $game = $this->game($player['current_game_id']);
+        $save = $game ? $this->save($playerId, $game['id']) : null;
+
+        return ($game && $save) ? [$game, $save] : [null, null];
+    }
+
+    private function noGameSelected(int $playerId): array
+    {
+        return [
+            'siker'   => false,
+            'esemeny' => 'Még nincs kiválasztott játék. Mutasd be a játékosnak a lehetőségeket, és a jatek_inditasa eszközzel indítsd el, amelyiket választja.',
+            'jatekok' => $this->listGames($playerId)['jatekok'],
+        ];
+    }
+
+    private function game(string $gameId): ?array
+    {
+        $stmt = $this->db->prepare('SELECT * FROM games WHERE id = ? AND active = 1');
+        $stmt->execute([$gameId]);
+
+        return $stmt->fetch() ?: null;
+    }
+
+    /** Játék keresése azonosító vagy cím (részlet) alapján, ékezetektől függetlenül. */
+    private function findGame(string $query): ?array
+    {
+        $q = self::simplify($query);
+        if ($q === '') {
+            return null;
+        }
+
+        $games = $this->db->query('SELECT * FROM games WHERE active = 1 ORDER BY sort_order')->fetchAll();
+
+        foreach ($games as $g) {
+            if (self::simplify($g['id']) === $q) {
+                return $g;
+            }
+        }
+
+        $matches = array_values(array_filter($games, fn (array $g) =>
+            str_contains(self::simplify($g['title']), $q) || str_contains($q, self::simplify($g['id']))));
+
+        return count($matches) === 1 ? $matches[0] : null;
+    }
+
+    private function save(int $playerId, string $gameId): ?array
+    {
+        $stmt = $this->db->prepare('SELECT * FROM saves WHERE player_id = ? AND game_id = ?');
+        $stmt->execute([$playerId, $gameId]);
+
+        return $stmt->fetch() ?: null;
+    }
+
+    private function createSave(int $playerId, array $game): void
+    {
+        $this->db->prepare(
+            'INSERT INTO saves (player_id, game_id, location_id, money, hunger, fatigue, health, game_minute)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        )->execute([
+            $playerId, $game['id'], $game['start_location'], $game['start_money'],
+            $game['start_hunger'], $game['start_fatigue'], $game['start_health'], $game['start_minute'],
+        ]);
+    }
+
+    private function gameInfo(array $game): array
+    {
+        return [
+            'id'             => $game['id'],
+            'cim'            => $game['title'],
+            'meseloi_stilus' => $game['narrator_style'],
+        ];
+    }
+
+    private function describeLocation(string $gameId, string $locationId): array
+    {
+        $stmt = $this->db->prepare('SELECT * FROM locations WHERE game_id = ? AND id = ?');
+        $stmt->execute([$gameId, $locationId]);
         $loc = $stmt->fetch();
 
         $stmt = $this->db->prepare(
             'SELECT e.direction, e.description, l.name AS target
-             FROM exits e JOIN locations l ON l.id = e.to_location
-             WHERE e.from_location = ? ORDER BY e.direction'
+             FROM exits e JOIN locations l ON l.game_id = e.game_id AND l.id = e.to_location
+             WHERE e.game_id = ? AND e.from_location = ? ORDER BY e.direction'
         );
-        $stmt->execute([$locationId]);
+        $stmt->execute([$gameId, $locationId]);
         $exits = array_map(fn (array $e) => [
             'irany'   => $e['direction'],
             'leiras'  => $e['description'],
@@ -168,10 +346,11 @@ final class GameEngine
         ], $stmt->fetchAll());
 
         $stmt = $this->db->prepare(
-            'SELECT i.name, li.quantity FROM location_items li JOIN items i ON i.id = li.item_id
-             WHERE li.location_id = ? AND li.quantity > 0 ORDER BY i.name'
+            'SELECT i.name, li.quantity FROM location_items li
+             JOIN items i ON i.game_id = li.game_id AND i.id = li.item_id
+             WHERE li.game_id = ? AND li.location_id = ? AND li.quantity > 0 ORDER BY i.name'
         );
-        $stmt->execute([$locationId]);
+        $stmt->execute([$gameId, $locationId]);
         $items = array_map(
             fn (array $r) => ['nev' => $r['name'], 'darab' => (int) $r['quantity']],
             $stmt->fetchAll()
@@ -183,25 +362,91 @@ final class GameEngine
             'leiras'    => $loc['description'],
             'kijaratok' => $exits,
             'targyak'   => $items,
-            'kep'       => $loc['image'],
+            'kep'       => $this->imageFor($gameId, $loc),
         ];
     }
 
-    private function locationName(string $locationId): string
+    private function locationName(string $gameId, string $locationId): string
     {
-        $stmt = $this->db->prepare('SELECT name FROM locations WHERE id = ?');
-        $stmt->execute([$locationId]);
+        $stmt = $this->db->prepare('SELECT name FROM locations WHERE game_id = ? AND id = ?');
+        $stmt->execute([$gameId, $locationId]);
 
         return (string) $stmt->fetchColumn();
     }
 
     /** @return list<string> */
-    private function exitDirections(string $locationId): array
+    private function exitDirections(string $gameId, string $locationId): array
     {
-        $stmt = $this->db->prepare('SELECT direction FROM exits WHERE from_location = ? ORDER BY direction');
-        $stmt->execute([$locationId]);
+        $stmt = $this->db->prepare('SELECT direction FROM exits WHERE game_id = ? AND from_location = ? ORDER BY direction');
+        $stmt->execute([$gameId, $locationId]);
 
         return $stmt->fetchAll(PDO::FETCH_COLUMN);
+    }
+
+    /**
+     * A képpanel adatai (MCP Apps): a játékos aktuális állapota egy helyen.
+     */
+    private function panel(int $playerId, array $game): array
+    {
+        $save = $this->save($playerId, $game['id']);
+        $loc  = $this->describeLocation($game['id'], $save['location_id']);
+
+        $stmt = $this->db->prepare(
+            'SELECT i.name, si.quantity FROM save_items si
+             JOIN items i ON i.game_id = si.game_id AND i.id = si.item_id
+             WHERE si.player_id = ? AND si.game_id = ? ORDER BY i.name'
+        );
+        $stmt->execute([$playerId, $game['id']]);
+
+        return [
+            'jatek'     => $game['title'],
+            'helyszin'  => $loc['nev'],
+            'kep'       => $loc['kep'],
+            'ido'       => self::formatTime((int) $save['game_minute']),
+            'penz'      => (int) $save['money'],
+            'egyseg'    => $game['money_label'],
+            'ehseg'     => (int) $save['hunger'],
+            'faradtsag' => (int) $save['fatigue'],
+            'egeszseg'  => (int) $save['health'],
+            'leltar'    => array_map(
+                fn (array $r) => ['nev' => $r['name'], 'darab' => (int) $r['quantity']],
+                $stmt->fetchAll()
+            ),
+            'kijaratok' => array_map(
+                fn (array $e) => ['irany' => Direction::label($e['irany']), 'celpont' => $e['celpont']],
+                $loc['kijaratok']
+            ),
+            'zene'      => null, // később: a játék hangulatzene-oldala
+        ];
+    }
+
+    /**
+     * A helyszín képének nyilvános címe.
+     * 1. ha az adatbázisban meg van adva (locations.image): azt használja
+     *    (teljes URL, vagy az assets/images mappához képesti útvonal);
+     * 2. különben megkeresi az assets/images/<játék>/<helyszín>.webp|jpg|jpeg|png fájlt.
+     */
+    private function imageFor(string $gameId, array $loc): ?string
+    {
+        if (!empty($loc['image'])) {
+            return preg_match('#^https?://#', $loc['image'])
+                ? $loc['image']
+                : ($this->imageUrl !== null ? $this->imageUrl.'/'.ltrim($loc['image'], '/') : null);
+        }
+
+        if ($this->imageDir === null || $this->imageUrl === null) {
+            return null;
+        }
+
+        foreach (self::IMAGE_EXTENSIONS as $ext) {
+            $relative = $gameId.'/'.$loc['id'].'.'.$ext;
+            $file = $this->imageDir.'/'.$relative;
+            if (is_file($file)) {
+                return $this->imageUrl.'/'.$relative.'?v='.filemtime($file); // a ?v= frissítéskor kikerüli a gyorsítótárat
+            }
+        }
+
+        return null;
     }
 
     public static function formatTime(int $minute): string
@@ -210,6 +455,15 @@ final class GameEngine
         $inDay = $minute % 1440;
 
         return sprintf('%d. nap, %02d:%02d', $day, intdiv($inDay, 60), $inDay % 60);
+    }
+
+    /** Kisbetűs, ékezet- és írásjelmentes alak az összehasonlításhoz. */
+    private static function simplify(string $s): string
+    {
+        $s = mb_strtolower(trim($s));
+        $s = strtr($s, ['á' => 'a', 'é' => 'e', 'í' => 'i', 'ó' => 'o', 'ö' => 'o', 'ő' => 'o', 'ú' => 'u', 'ü' => 'u', 'ű' => 'u']);
+
+        return trim((string) preg_replace('/[^a-z0-9]+/', ' ', $s));
     }
 
     private static function clamp(int $v): int

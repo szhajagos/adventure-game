@@ -19,6 +19,20 @@ use Mcp\Server\Transport\StreamableHttpTransport;
 
 require dirname(__DIR__).'/vendor/autoload.php';
 
+// Tesztidőszaki védelem: titkos kulcs az URL-ben  →  /mcp/<kulcs>
+// Ha az MCP_ACCESS_KEY be van állítva (config.php vagy környezeti változó),
+// kulcs nélkül vagy rossz kulccsal a végpont „nem létezik” (404).
+$accessKey = (string) Config::get('MCP_ACCESS_KEY', '');
+if ($accessKey !== '') {
+    $given = (string) ($_GET['mcp_key'] ?? trim((string) ($_SERVER['PATH_INFO'] ?? ''), '/'));
+    if (!hash_equals($accessKey, $given)) {
+        http_response_code(404);
+        header('Content-Type: text/plain; charset=utf-8');
+        echo "Not Found\n";
+        exit;
+    }
+}
+
 // Webtárhelyen az Authorization fejlécet a .htaccess adja át; egy belső
 // átirányítás után REDIRECT_ előtaggal érkezik. (A későbbi bejelentkezéshez kell.)
 if (empty($_SERVER['HTTP_AUTHORIZATION']) && !empty($_SERVER['REDIRECT_HTTP_AUTHORIZATION'])) {
@@ -34,7 +48,19 @@ $allowedHosts = array_values(array_filter(array_map(
     explode(',', Config::get('MCP_ALLOWED_HOSTS', 'localhost,127.0.0.1'))
 )));
 
-$server = ServerFactory::create(new GameEngine(Database::connect()), $playerId);
+// A képek nyilvános címe: APP_URL a beállításokból, vagy a kérés saját címe.
+$appUrl = rtrim((string) Config::get('APP_URL', ''), '/');
+if ($appUrl === '' && !empty($_SERVER['HTTP_HOST'])) {
+    $https  = ($_SERVER['HTTPS'] ?? '') === 'on' || ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https';
+    $appUrl = ($https ? 'https' : 'http').'://'.$_SERVER['HTTP_HOST'];
+}
+
+$engine = new GameEngine(
+    Database::connect(),
+    imageDir: dirname(__DIR__).'/assets/images',
+    imageUrl: $appUrl !== '' ? $appUrl.'/assets/images' : null,
+);
+$server = ServerFactory::create($engine, $playerId, $appUrl !== '' ? $appUrl : null);
 
 $transport = new StreamableHttpTransport(
     (new Psr17Factory())->createServerRequestFromGlobals(),

@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MCP Adventure</title>
+<style>
+  :root {
+    --bg: #1b1934;
+    --panel: #24214a;
+    --frame: #a5a5ff;
+    --text: #e8e6ff;
+    --muted: #9c98d6;
+    --good: #7bd389;
+    --mid: #f2c14e;
+    --bad: #ef6f6c;
+    --mono: ui-monospace, "Cascadia Mono", "Consolas", "Courier New", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: transparent; }
+  body { font-family: var(--mono); color: var(--text); font-size: 13px; line-height: 1.4; }
+
+  .card { background: var(--bg); border: 3px solid var(--frame); padding: 10px; max-width: 760px; }
+  .title { display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+           color: var(--frame); text-transform: uppercase; letter-spacing: .08em; font-size: 12px; margin-bottom: 8px; }
+  .title .time { color: var(--muted); text-transform: none; letter-spacing: 0; white-space: nowrap; }
+
+  /* Kép */
+  .scene { position: relative; aspect-ratio: 16 / 9; border: 2px solid var(--frame); overflow: hidden; background: #000; }
+  .scene img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .placeholder { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+                 background: linear-gradient(180deg, #2b2257 0%, #5b3b7a 45%, #c9706b 75%, #f0a868 100%); }
+  .placeholder::before { content: ""; position: absolute; inset: 0; opacity: .55;
+                 background-image: radial-gradient(1px 1px at 12% 18%, #fff, transparent), radial-gradient(1px 1px at 33% 9%, #fff, transparent),
+                   radial-gradient(1px 1px at 58% 22%, #fff, transparent), radial-gradient(1px 1px at 81% 12%, #fff, transparent),
+                   radial-gradient(1px 1px at 91% 31%, #fff, transparent), radial-gradient(1px 1px at 22% 35%, #fff, transparent); }
+  .placeholder .hills { position: absolute; left: 0; right: 0; bottom: 0; height: 32%;
+                 background: radial-gradient(120% 100% at 30% 100%, #1b1934 60%, transparent 61%),
+                             radial-gradient(90% 80% at 85% 100%, #24214a 60%, transparent 61%); }
+  .placeholder span { position: relative; color: #fff; opacity: .85; font-size: 12px; letter-spacing: .2em; text-transform: uppercase; }
+  .caption { position: absolute; left: 0; right: 0; bottom: 0; padding: 6px 10px; font-size: 14px; font-weight: 700;
+             background: linear-gradient(0deg, rgba(10,8,30,.85), rgba(10,8,30,0)); color: #fff; }
+
+  /* Adatok */
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px 14px; margin-top: 10px; }
+  .stat label { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+  .bar { height: 8px; background: var(--panel); border: 1px solid #3a3670; margin-top: 3px; }
+  .bar i { display: block; height: 100%; transition: width .4s ease; }
+  .row { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 10px; align-items: center; }
+  .money { font-size: 15px; font-weight: 700; color: var(--mid); }
+  .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; }
+  .chip { border: 1px solid #3a3670; background: var(--panel); padding: 1px 7px; font-size: 12px; }
+  .exits { color: var(--muted); font-size: 12px; }
+  .exits b { color: var(--text); font-weight: 600; }
+  .music { margin-left: auto; background: none; border: 1px solid var(--frame); color: var(--frame); font: inherit;
+           font-size: 12px; padding: 3px 8px; cursor: pointer; }
+  .music:hover { background: var(--frame); color: var(--bg); }
+  .empty { padding: 18px 6px; text-align: center; color: var(--muted); }
+  [hidden] { display: none !important; }
+
+  @media (max-width: 480px) { .stats { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="title"><span id="game">MCP Adventure</span><span class="time" id="time"></span></div>
+
+  <div id="content" hidden>
+    <div class="scene">
+      <img id="img" alt="" hidden>
+      <div class="placeholder" id="ph"><div class="hills"></div><span>kép hamarosan</span></div>
+      <div class="caption" id="place"></div>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><label>Éhség <span id="hungerV"></span></label><div class="bar"><i id="hungerB"></i></div></div>
+      <div class="stat"><label>Fáradtság <span id="fatigueV"></span></label><div class="bar"><i id="fatigueB"></i></div></div>
+      <div class="stat"><label>Egészség <span id="healthV"></span></label><div class="bar"><i id="healthB"></i></div></div>
+    </div>
+
+    <div class="row">
+      <span class="money" id="money"></span>
+      <span class="label">Leltár</span>
+      <div class="chips" id="inv"></div>
+      <button class="music" id="music" hidden>♪ Hangulatzene</button>
+    </div>
+    <div class="row exits" id="exits"></div>
+  </div>
+
+  <div class="empty" id="empty">Válassz egy játékot, és indulhat a kaland.</div>
+</div>
+
+<script>
+  // --- MCP Apps protokoll: JSON-RPC üzenetek az iframe (View) és a host között ---
+  let rid = 0;
+  const pending = new Map();
+  const post = (m) => window.parent.postMessage(m, '*');
+  const rpc = (method, params) => new Promise((resolve, reject) => {
+    const id = ++rid; pending.set(id, { resolve, reject });
+    post({ jsonrpc: '2.0', id, method, params });
+  });
+  const notify = (method, params) => post({ jsonrpc: '2.0', method, params });
+
+  window.addEventListener('message', (e) => {
+    let m = e.data;
+    if (typeof m === 'string') { try { m = JSON.parse(m); } catch { return; } }
+    if (!m || typeof m !== 'object') return;
+    if (m.id !== undefined && pending.has(m.id)) {
+      const p = pending.get(m.id); pending.delete(m.id);
+      m.error ? p.reject(m.error) : p.resolve(m.result);
+      return;
+    }
+    if (m.method === 'ui/notifications/tool-result') render(m.params);
+  });
+
+  (async () => {
+    try {
+      await rpc('ui/initialize', { protocolVersion: '2026-01-26', capabilities: {},
+                                   clientInfo: { name: 'mcp-adventure-panel', version: '1.0.0' } });
+    } catch { /* régebbi hostok: továbbmegyünk */ }
+    notify('ui/notifications/initialized', {});
+    reportSize();
+  })();
+
+  let lastH = 0;
+  function reportSize() {
+    const h = Math.ceil(document.documentElement.scrollHeight);
+    if (h === lastH) return; lastH = h;
+    notify('ui/notifications/size-changed', { width: Math.ceil(document.documentElement.scrollWidth), height: h });
+  }
+  new ResizeObserver(reportSize).observe(document.body);
+
+  // --- Megjelenítés ---
+  const $ = (id) => document.getElementById(id);
+
+  function dataOf(result) {
+    if (result?.structuredContent && typeof result.structuredContent === 'object') return result.structuredContent;
+    const t = result?.content?.find?.((c) => c.type === 'text')?.text;
+    try { return t ? JSON.parse(t) : null; } catch { return null; }
+  }
+
+  function color(v, higherIsBetter) {
+    const good = higherIsBetter ? v >= 60 : v <= 40;
+    const bad  = higherIsBetter ? v < 30  : v > 75;
+    return good ? 'var(--good)' : bad ? 'var(--bad)' : 'var(--mid)';
+  }
+  function bar(key, v, higherIsBetter) {
+    $(key + 'V').textContent = v + '/100';
+    $(key + 'B').style.width = Math.max(0, Math.min(100, v)) + '%';
+    $(key + 'B').style.background = color(v, higherIsBetter);
+  }
+
+  let musicUrl = null;
+  $('music').addEventListener('click', async () => {
+    if (!musicUrl) return;
+    try { await rpc('ui/open-link', { url: musicUrl }); } catch { window.open(musicUrl, '_blank', 'noopener'); }
+  });
+
+  function render(result) {
+    const p = dataOf(result)?.panel;
+    if (!p) { $('content').hidden = true; $('empty').hidden = false; return; }
+
+    $('empty').hidden = true; $('content').hidden = false;
+    $('game').textContent = p.jatek || 'MCP Adventure';
+    $('time').textContent = p.ido || '';
+    $('place').textContent = p.helyszin || '';
+
+    const img = $('img');
+    if (p.kep) {
+      img.onload = () => {
+        // Kis felbontású (pixel art) kép: éles, kockás nagyítás elmosás helyett
+        img.style.imageRendering = img.naturalWidth <= 640 ? 'pixelated' : 'auto';
+        img.hidden = false; $('ph').hidden = true; reportSize();
+      };
+      img.onerror = () => { img.hidden = true; $('ph').hidden = false; };
+      img.alt = p.helyszin || '';
+      img.src = p.kep;
+    } else { img.hidden = true; $('ph').hidden = false; }
+
+    bar('hunger', p.ehseg ?? 0, false);
+    bar('fatigue', p.faradtsag ?? 0, false);
+    bar('health', p.egeszseg ?? 0, true);
+    $('money').textContent = (p.penz ?? 0).toLocaleString('hu-HU') + ' ' + (p.egyseg || '');
+
+    const inv = $('inv'); inv.replaceChildren();
+    const items = p.leltar || [];
+    if (!items.length) { const s = document.createElement('span'); s.className = 'chip'; s.textContent = 'üres'; inv.append(s); }
+    for (const it of items) {
+      const s = document.createElement('span'); s.className = 'chip';
+      s.textContent = it.darab > 1 ? `${it.nev} ×${it.darab}` : it.nev; inv.append(s);
+    }
+
+    const ex = $('exits'); ex.replaceChildren();
+    const label = document.createElement('span'); label.className = 'label'; label.textContent = 'Kijáratok'; ex.append(label);
+    for (const e of p.kijaratok || []) {
+      const s = document.createElement('span');
+      const b = document.createElement('b'); b.textContent = e.irany;
+      s.append(b, ' → ' + e.celpont); ex.append(s);
+    }
+
+    musicUrl = p.zene || null;
+    $('music').hidden = !musicUrl;
+    reportSize();
+  }
+</script>
+</body>
+</html>

@@ -44,10 +44,12 @@ Eszközök (tools):
 
 | Eszköz | Mit csinál |
 |---|---|
+| `jatekok` | az elérhető játékok listája, a saját állásokkal |
+| `jatek_inditasa` | játék indítása vagy folytatása (`jatek`: azonosító vagy cím) |
 | `korulnez` | leírja a helyszínt, a kijáratokat és a tárgyakat |
 | `menj` | mozgás egy irányba (`irany`: eszak, del, kelet, nyugat, fel, le, be, ki…) |
 | `allapot` | pénz, éhség, fáradtság, egészség, idő, leltár |
-| `uj_jatek` | a játékos visszaáll a kezdőállapotba |
+| `uj_jatek` | az aktuális játék újrakezdése (a többi játék állása megmarad) |
 
 Tesztelés MCP Inspectorral (Node.js kell hozzá):
 
@@ -81,12 +83,21 @@ a webgyökér nem állítható át, és minden a `public_html`-be kerül.
 
 Követelmények: PHP 8.2+ (`pdo_mysql`), MariaDB/MySQL, Apache 2.4 + `mod_rewrite`, HTTPS.
 
-1. Itthon, a Dockerben: `docker compose exec web composer install --no-dev --optimize-autoloader`
-2. Töltsd fel a `public_html`-be: `.htaccess`, `public/`, `src/`, `vendor/`, `config/`, `assets/`
-   (a `docker/`, `db/`, `.git/`, `README.md` stb. nem kell, de ha felkerül, akkor is tiltott).
-3. A `config/config.example.php` alapján hozd létre a `config/config.php`-t a tárhely adataival.
-4. Az adatbázist a tárhely phpMyAdminjában hozd létre a `db/init/*.sql` fájlokból (sorrendben).
-5. A Claude-ban a connector címe: `https://a-domained.hu/mcp`
+1. Itthon, a Dockerben a csomagok:
+   `docker compose exec web composer install --no-dev --optimize-autoloader`
+2. Csomag készítése a projektmappában (Windows PowerShell):
+   `tar -a -c -f deploy.zip --exclude config/config.php .htaccess public src vendor config assets`
+3. cPanel → File Manager → az aldomain mappája: töltsd fel a `deploy.zip`-et, majd **Extract**, végül töröld a zipet.
+4. A `config/config.example.php` alapján hozd létre a `config/config.php`-t a tárhely adataival
+   és egy titkos `MCP_ACCESS_KEY` kulccsal.
+5. Az adatbázist a tárhely phpMyAdminjában töltsd fel: `db/init/*.sql`, sorrendben (001, 002, 003…).
+6. A Claude-ban a connector címe: `https://play.mcpadventure.com/mcp/<MCP_ACCESS_KEY>`, hitelesítés: **No sign-in**.
+
+Titkos kulcs készítése (PowerShell):
+
+```powershell
+$b = New-Object byte[] 24; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); -join ($b | % { $_.ToString('x2') })
+```
 
 A `.htaccess` védelme:
 

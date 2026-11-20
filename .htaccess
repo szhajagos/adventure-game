@@ -37,8 +37,9 @@ RedirectMatch 404 ^/(src|vendor|db|docker|config|\.git)(/|$)
     # Helyszínképek közvetlenül
     RewriteRule ^assets/images/ - [L]
 
-    # Az MCP-végpont rövid címe
+    # Az MCP-végpont rövid címe:  /mcp  vagy  /mcp/<titkos-kulcs>
     RewriteRule ^mcp/?$ public/mcp.php [L,QSA]
+    RewriteRule ^mcp/([A-Za-z0-9_-]+)/?$ public/mcp.php?mcp_key=$1 [L,QSA]
 
     # Minden más a public/ mappából
     RewriteCond %{REQUEST_URI} !(^|/)public/
