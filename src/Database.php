@@ -7,7 +7,8 @@ namespace AdventureGame;
 use PDO;
 
 /**
- * Adatbázis-kapcsolat a környezeti változókból (DB_HOST, DB_NAME, DB_USER, DB_PASS).
+ * Adatbázis-kapcsolat. A beállítások a Config osztályból jönnek
+ * (környezeti változó vagy config/config.php).
  */
 final class Database
 {
@@ -15,11 +16,11 @@ final class Database
     {
         $dsn = sprintf(
             'mysql:host=%s;dbname=%s;charset=utf8mb4',
-            getenv('DB_HOST') ?: 'localhost',
-            getenv('DB_NAME') ?: 'adventure',
+            Config::get('DB_HOST', 'localhost'),
+            Config::get('DB_NAME', 'adventure'),
         );
 
-        return new PDO($dsn, getenv('DB_USER') ?: 'adventure', getenv('DB_PASS') ?: 'adventure', [
+        return new PDO($dsn, Config::get('DB_USER', 'adventure'), Config::get('DB_PASS', 'adventure'), [
             PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
             PDO::ATTR_EMULATE_PREPARES   => false,

@@ -18,6 +18,29 @@ services:
       db:
         condition: service_healthy
 
+  # Tárhely-szimuláció: a projektgyökér a webgyökér (mint egy kötött public_html),
+  # és a .htaccess fájlok érvényesek. Indítás:  docker compose --profile tarhely up -d
+  # Cím: http://localhost:8102
+  web-tarhely:
+    build: ./docker/php
+    profiles: ["tarhely"]
+    ports:
+      - "${TARHELY_PORT:-8102}:80"
+    volumes:
+      - ./:/var/www/html
+      - ./docker/php/tarhely-vhost.conf:/etc/apache2/sites-enabled/000-default.conf:ro
+      - ./docker/php/ures.conf:/etc/apache2/conf-enabled/mcp.conf:ro
+    environment:
+      DB_HOST: db
+      DB_NAME: ${DB_NAME:-adventure}
+      DB_USER: ${DB_USER:-adventure}
+      DB_PASS: ${DB_PASS:-adventure}
+      PLAYER_ID: ${PLAYER_ID:-1}
+      MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-localhost,127.0.0.1}
+    depends_on:
+      db:
+        condition: service_healthy
+
   db:
     image: mariadb:11
     environment:

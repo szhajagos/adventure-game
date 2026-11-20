@@ -2,11 +2,12 @@
 
 /*
  * Az MCP-végpont: ide csatlakozik a játékos Claude-ja vagy ChatGPT-je.
- * Helyi cím: http://localhost:8100/mcp.php
+ * Cím: /mcp  (vagy közvetlenül /mcp.php)
  */
 
 declare(strict_types=1);
 
+use AdventureGame\Config;
 use AdventureGame\Database;
 use AdventureGame\Game\GameEngine;
 use AdventureGame\Mcp\ServerFactory;
@@ -18,12 +19,20 @@ use Mcp\Server\Transport\StreamableHttpTransport;
 
 require dirname(__DIR__).'/vendor/autoload.php';
 
-// Prototípus: egyetlen játékos. Később a bejelentkezésből (OAuth) jön.
-$playerId = (int) (getenv('PLAYER_ID') ?: 1);
+// Webtárhelyen az Authorization fejlécet a .htaccess adja át; egy belső
+// átirányítás után REDIRECT_ előtaggal érkezik. (A későbbi bejelentkezéshez kell.)
+if (empty($_SERVER['HTTP_AUTHORIZATION']) && !empty($_SERVER['REDIRECT_HTTP_AUTHORIZATION'])) {
+    $_SERVER['HTTP_AUTHORIZATION'] = $_SERVER['REDIRECT_HTTP_AUTHORIZATION'];
+}
 
-// Mely host-nevekről fogadunk kéréseket (pl. a Cloudflare-alagút címe).
-// Vesszővel elválasztva a .env MCP_ALLOWED_HOSTS változójában; '*' = bármelyik.
-$allowedHosts = array_filter(array_map('trim', explode(',', getenv('MCP_ALLOWED_HOSTS') ?: 'localhost,127.0.0.1')));
+// Prototípus: egyetlen játékos. Később a bejelentkezésből (OAuth) jön.
+$playerId = (int) Config::get('PLAYER_ID', '1');
+
+// Mely host-nevekről fogadunk kéréseket (élesben: a domained). '*' = bármelyik.
+$allowedHosts = array_values(array_filter(array_map(
+    'trim',
+    explode(',', Config::get('MCP_ALLOWED_HOSTS', 'localhost,127.0.0.1'))
+)));
 
 $server = ServerFactory::create(new GameEngine(Database::connect()), $playerId);
 

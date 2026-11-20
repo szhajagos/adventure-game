@@ -1,17 +1,14 @@
 <?php
 declare(strict_types=1);
 
+use AdventureGame\Database;
+
 $status = 'OK';
 $locations = [];
 
 try {
-    $pdo = new PDO(
-        sprintf('mysql:host=%s;dbname=%s;charset=utf8mb4', getenv('DB_HOST'), getenv('DB_NAME')),
-        getenv('DB_USER'),
-        getenv('DB_PASS'),
-        [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]
-    );
-    $locations = $pdo->query('SELECT id, name, description FROM locations')->fetchAll(PDO::FETCH_ASSOC);
+    require dirname(__DIR__).'/vendor/autoload.php';
+    $locations = Database::connect()->query('SELECT id, name, description FROM locations')->fetchAll();
 } catch (Throwable $e) {
     $status = 'HIBA: ' . $e->getMessage();
 }

@@ -1,0 +1,6 @@
+# A public/ a webes rész. A gyökér .htaccess ide irányít minden kérést;
+# a saját RewriteEngine miatt a gyökér szabályai itt nem futnak le újra.
+Options -Indexes -MultiViews
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+</IfModule>

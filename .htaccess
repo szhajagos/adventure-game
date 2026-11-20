@@ -1,0 +1,46 @@
+# ============================================================================
+#  Adventure Game – védelem kötött public_html-es webtárhelyhez
+#
+#  A projekt teljes tartalma a public_html-be kerül. Kívülről csak ezek
+#  érhetők el:  a public/ mappa (index.php, mcp.php),  a /mcp cím,
+#  és az assets/images/ képei. Minden más tiltott.
+#  Szükséges: Apache 2.4, mod_rewrite (szinte minden tárhelyen alap).
+# ============================================================================
+
+Options -Indexes -MultiViews
+DirectoryIndex index.php index.html
+
+# --- 1. Belső mappák tiltása (mod_rewrite nélkül is működik) ----------------
+RedirectMatch 404 ^/(src|vendor|db|docker|config|\.git)(/|$)
+
+# --- 2. Érzékeny fájlok tiltása bárhol --------------------------------------
+#  rejtett fájlok (.env, .gitignore…), composer-fájlok, SQL, dokumentáció,
+#  Docker- és egyéb konfigurációs fájlok, mentések, naplók
+<FilesMatch "(^\.|^composer\.(json|lock)$|^Dockerfile$|\.(sql|md|ya?ml|lock|dist|example|log|bak|old|sh|ini|conf)$)">
+    Require all denied
+</FilesMatch>
+
+# --- 3. Átirányítások -------------------------------------------------------
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Az Authorization fejléc továbbadása a PHP-nak (a későbbi bejelentkezéshez)
+    RewriteCond %{HTTP:Authorization} .
+    RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+
+    # Let's Encrypt tanúsítvány-ellenőrzés: maradjon érintetlen
+    RewriteRule ^\.well-known/acme-challenge/ - [L]
+
+    # Belső mappák: biztos, ami biztos
+    RewriteRule ^(src|vendor|db|docker|config)(/|$) - [R=404,L]
+
+    # Helyszínképek közvetlenül
+    RewriteRule ^assets/images/ - [L]
+
+    # Az MCP-végpont rövid címe
+    RewriteRule ^mcp/?$ public/mcp.php [L,QSA]
+
+    # Minden más a public/ mappából
+    RewriteCond %{REQUEST_URI} !(^|/)public/
+    RewriteRule ^(.*)$ public/$1 [L,QSA]
+</IfModule>

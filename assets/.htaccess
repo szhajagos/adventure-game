@@ -1,0 +1,5 @@
+# Az assets/ mappából csak képek tölthetők le, semmi más (PHP sem fut).
+Require all denied
+<FilesMatch "\.(png|jpe?g|webp|gif)$">
+    Require all granted
+</FilesMatch>
