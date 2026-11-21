@@ -22,6 +22,8 @@ final class Context
     public array $featureMap = [];
     /** A szabálymotor: az óránkénti és az éjféli szabályokhoz kell */
     public ?Rules $rules = null;
+    /** A szereplők (a „jelen_van” feltételhez és a kereskedéshez) */
+    public ?Npcs $npcs = null;
     private bool $ticking = false;
 
     public function __construct(
@@ -63,6 +65,9 @@ final class Context
                 $left -= $step;
                 $this->record($this->state->passTime($step));
                 if ($this->minute % 60 === 0) {
+                    if ($this->minute % 1440 === 60 * (int) ($this->settings['keszletpotlas_ora'] ?? 6)) {
+                        $this->state->resetPrefix('keszlet:'); // a kereskedők készlete reggel pótlódik
+                    }
                     if ($this->minute % 1440 === 0) {
                         $this->state->resetDaily();
                         $this->rules->after($this, ['muvelet' => 'ejfelkor']);

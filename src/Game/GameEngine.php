@@ -25,7 +25,7 @@ final class GameEngine
     public const DAY_PARTS = ['hajnal' => 'hajnal', 'nappal' => 'nappal', 'este' => 'este', 'ejszaka' => 'éjszaka'];
 
     /** Egyes műveletek időigénye percben */
-    private const MINUTES = ['felvesz' => 1, 'letesz' => 1, 'belerak' => 1, 'kivesz' => 1, 'megvizsgal' => 2, 'fogyaszt' => 5];
+    private const MINUTES = ['felvesz' => 1, 'letesz' => 1, 'belerak' => 1, 'kivesz' => 1, 'megvizsgal' => 2, 'fogyaszt' => 5, 'beszel' => 5, 'odaad' => 1, 'vesz' => 2];
 
     /** @var array<string, list<array>> */
     private array $statDefCache = [];
@@ -394,6 +394,270 @@ final class GameEngine
     }
 
     // =====================================================================
+    //  Szereplők és kereskedés
+    // =====================================================================
+
+    /** Beszélgetés: téma nélkül a szereplő adatlapja és a témái; témával amit elmond róla. */
+    public function talk(int $playerId, string $npc, ?string $topic = null): array
+    {
+        return $this->run($playerId, 'beszel', function (Context $ctx) use ($npc, $topic) {
+            [$who, $alts] = $ctx->npcs->find($npc, $ctx->npcs->present($ctx));
+            if ($who === null) {
+                return $this->npcNotFound($npc, $alts);
+            }
+            $topics = $ctx->npcs->topics($who['id'], $ctx);
+            $chosen = ($topic !== null && trim($topic) !== '') ? $ctx->npcs->findTopic($topic, $topics) : null;
+            $event = ['muvelet' => 'beszel', 'szereplo' => $who['id']];
+
+            return $this->rules($ctx)->around($ctx, $event, function () use ($ctx, $who, $topics, $topic, $chosen) {
+                $ctx->passTime(self::MINUTES['beszel']);
+                $out = [
+                    'siker'     => true,
+                    'esemeny'   => sprintf('A játékos beszél vele: %s.', $who['name']),
+                    'szereplo'  => $this->npcView($ctx, $who, $topics),
+                ];
+                if ($topic !== null && trim($topic) !== '') {
+                    if ($chosen === null) {
+                        $out['tema'] = ['kerdes' => $topic, 'valasz' => null,
+                            'megjegyzes' => 'Erről a szereplő nem tud, vagy nem hajlandó beszélni. Válaszolj kitérően a nevében, új tényt ne találj ki.'];
+                    } else {
+                        $first = !$ctx->state->flag('_tema:'.$chosen['id']);
+                        if ($first) {
+                            $ctx->state->setFlag('_tema:'.$chosen['id'], true);
+                            Rules::apply(json_decode((string) $chosen['effects'], true) ?: [], $ctx, ['muvelet' => 'beszel', 'szereplo' => $who['id']]);
+                        }
+                        $out['tema'] = ['cim' => $chosen['title'], 'valasz' => $chosen['content'], 'mar_elmondta' => !$first];
+                        $out['szereplo']['temak'] = $this->topicList($ctx, $topics);
+                    }
+                }
+
+                return $out;
+            });
+        });
+    }
+
+    /** Egy nálunk lévő tárgy odaadása egy jelen lévő szereplőnek. */
+    public function give(int $playerId, string $item, string $npc): array
+    {
+        return $this->run($playerId, 'odaad', function (Context $ctx) use ($item, $npc) {
+            [$who, $alts] = $ctx->npcs->find($npc, $ctx->npcs->present($ctx));
+            if ($who === null) {
+                return $this->npcNotFound($npc, $alts);
+            }
+            $w = $ctx->world;
+            [$inst, $alts] = $w->findByName($item, $w->carried());
+            if ($inst === null) {
+                return $this->notFound($item, $alts, 'nala');
+            }
+            $event = ['muvelet' => 'odaad', 'targy' => $inst['item_id'], 'szereplo' => $who['id']];
+
+            return $this->rules($ctx)->around($ctx, $event, function () use ($ctx, $inst, $who) {
+                $ctx->world->move($inst, 1, 'npc', $who['id']);
+                $ctx->passTime(self::MINUTES['odaad']);
+
+                return ['siker' => true, 'esemeny' => sprintf('A játékos odaadta: %s → %s.', $ctx->world->name($inst), $who['name'])];
+            });
+        });
+    }
+
+    /** Vásárlás egy jelen lévő szereplőtől vagy a helyszín automatájából (pénzért vagy cserébe). */
+    public function buy(int $playerId, string $item, ?int $quantity = null, ?string $from = null): array
+    {
+        return $this->run($playerId, 'vesz', function (Context $ctx) use ($item, $quantity, $from) {
+            [$trade, $error] = $this->pickTrade($ctx, 'arul', $item, $from);
+            if ($trade === null) {
+                return $error;
+            }
+            $w = $ctx->world;
+            $qty = max(1, min(99, $quantity ?? 1));
+            $left = $ctx->npcs->remaining($trade, $ctx);
+            if ($left !== null && $left < $qty) {
+                return ['siker' => false, 'esemeny' => $left === 0
+                    ? 'Ebből mára elfogyott a készlet; reggel lesz újra.'
+                    : sprintf('Ebből ma már csak %d darab van.', $left)];
+            }
+            if (!Rules::check($trade['conditions'], $ctx, ['muvelet' => 'vesz', 'targy' => $trade['item_id']])) {
+                return ['siker' => false, 'esemeny' => 'Az eladó nem hajlandó kiszolgálni a játékost (lehet, hogy az ápolatlansága vagy a rossz híre miatt).'];
+            }
+            $name = $w->type($trade['item_id'])['name'];
+
+            // fizetőeszköz: pénz vagy cseretárgy
+            $price = $ctx->npcs->unitPrice($trade, $w, $ctx);
+            $money = $ctx->state->moneyStat();
+            if ($trade['price_item_id'] !== null) {
+                if ($w->countCarried($trade['price_item_id']) < $qty) {
+                    return ['siker' => false, 'esemeny' => sprintf('Ezért cserébe ez kellene: %s (%d db), de nincs nála ennyi.', $w->type($trade['price_item_id'])['name'], $qty)];
+                }
+            } elseif ($price > 0 && ($money === null || $ctx->state->stat($money) < $price * $qty)) {
+                return ['siker' => false, 'esemeny' => sprintf('Nincs elég pénze: %d kellene, %d van nála.', $price * $qty, $money ? (int) $ctx->state->stat($money) : 0)];
+            }
+            // elfér-e?
+            $probe = ['id' => 0, 'item_id' => $trade['item_id'], 'quantity' => $qty, 'place_type' => 'location', 'place_id' => $ctx->location];
+            [$type, $place, $err] = $w->autoPlace($probe, $qty);
+            if ($err !== null) {
+                return ['siker' => false, 'esemeny' => $err.' Előbb tegyen le vagy rakjon el valamit.'];
+            }
+            $event = ['muvelet' => 'vesz', 'targy' => $trade['item_id'], 'szereplo' => $trade['trader_type'] === 'npc' ? $trade['trader_id'] : null];
+
+            return $this->rules($ctx)->around($ctx, $event, function () use ($ctx, $trade, $qty, $price, $money, $type, $place, $name) {
+                $w = $ctx->world;
+                if ($trade['price_item_id'] !== null) {
+                    Rules::apply([['targy_elvesz' => [$trade['price_item_id'], $qty]]], $ctx);
+                    $paid = sprintf('cserébe: %s ×%d', $w->type($trade['price_item_id'])['name'], $qty);
+                } else {
+                    $ctx->addStat($money ?? '', -$price * $qty);
+                    $paid = trim(($price * $qty).' '.$this->moneyUnit($ctx));
+                }
+                $id = $w->create($trade['item_id'], $qty, 'location', $ctx->location, $ctx->minute);
+                $id = $w->move($w->get($id), $qty, $type, $place);
+                $this->afterTrade($ctx, $trade, $qty);
+
+                return ['siker' => true, 'esemeny' => sprintf('A játékos megvette: %s ×%d (%s) → %s.', $name, $qty, $paid, $w->whereLabel($w->get($id)))];
+            });
+        });
+    }
+
+    /** Eladás: a nálunk lévő tárgyat egy itteni felvásárló megveszi. */
+    public function sell(int $playerId, string $item, ?int $quantity = null, ?string $to = null): array
+    {
+        return $this->run($playerId, 'elad', function (Context $ctx) use ($item, $quantity, $to) {
+            $w = $ctx->world;
+            [$inst, $alts] = $w->findByName($item, $w->carried());
+            if ($inst === null) {
+                return $this->notFound($item, $alts, 'nala');
+            }
+            [$trade, $error] = $this->pickTrade($ctx, 'felvasarol', $w->name($inst), $to, $inst['item_id']);
+            if ($trade === null) {
+                return $error;
+            }
+            if ($w->at('container', (string) $inst['id'])) {
+                return ['siker' => false, 'esemeny' => 'Előbb ki kell üríteni.'];
+            }
+            $have = $w->countCarried($inst['item_id']);
+            $qty = max(1, min($quantity ?? $have, $have));
+            $left = $ctx->npcs->remaining($trade, $ctx);
+            if ($left !== null) {
+                if ($left === 0) {
+                    return ['siker' => false, 'esemeny' => 'Ma már nem vesz át többet ebből; reggel újra lehet próbálni.'];
+                }
+                $qty = min($qty, $left);
+            }
+            if (!Rules::check($trade['conditions'], $ctx, ['muvelet' => 'elad', 'targy' => $trade['item_id']])) {
+                return ['siker' => false, 'esemeny' => 'A felvásárló most nem hajlandó üzletelni a játékossal.'];
+            }
+            $price = (int) $ctx->npcs->unitPrice($trade, $w, $ctx);
+            $event = ['muvelet' => 'elad', 'targy' => $trade['item_id'], 'szereplo' => $trade['trader_type'] === 'npc' ? $trade['trader_id'] : null];
+
+            return $this->rules($ctx)->around($ctx, $event, function () use ($ctx, $trade, $qty, $price) {
+                $name = $ctx->world->type($trade['item_id'])['name'];
+                Rules::apply([['targy_elvesz' => [$trade['item_id'], $qty]]], $ctx);
+                if (($money = $ctx->state->moneyStat()) !== null) {
+                    $ctx->addStat($money, $price * $qty);
+                }
+                $this->afterTrade($ctx, $trade, $qty);
+
+                return ['siker' => true, 'esemeny' => sprintf('A játékos eladta: %s ×%d, kapott érte: %s.', $name, $qty, trim(($price * $qty).' '.$this->moneyUnit($ctx)))];
+            });
+        });
+    }
+
+    /** @return array{0: ?array, 1: array} [a kereskedési sor, egyébként a hibaválasz] */
+    private function pickTrade(Context $ctx, string $mode, string $item, ?string $trader, ?string $itemId = null): array
+    {
+        $w = $ctx->world;
+        $lines = $ctx->npcs->tradesHere($ctx, $mode);
+        if (!$lines) {
+            return [null, ['siker' => false, 'esemeny' => $mode === 'arul' ? 'Itt most senki nem árul semmit.' : 'Itt most senki nem vásárol fel semmit.']];
+        }
+        $names = $this->locationNames($ctx->gameId());
+        if ($trader !== null && trim($trader) !== '') {
+            $t = World::simplify($trader);
+            $lines = array_values(array_filter($lines, fn ($l) => str_contains(World::simplify($ctx->npcs->traderName($l, $names)), $t)
+                || str_contains($t, World::simplify($l['trader_id'])))) ?: $lines;
+        }
+        $q = World::simplify($item);
+        $match = array_values(array_filter($lines, function ($l) use ($w, $q, $itemId) {
+            if ($itemId !== null) {
+                return $l['item_id'] === $itemId;
+            }
+            $n = World::simplify($w->type($l['item_id'])['name'] ?? '');
+            return $n === $q || World::simplify($l['item_id']) === $q || ($q !== '' && (str_contains($n, $q) || str_contains($q, $n)));
+        }));
+        if (!$match) {
+            return [null, [
+                'siker'   => false,
+                'esemeny' => $mode === 'arul' ? sprintf('Itt nem árulnak ilyet: „%s”.', $item) : sprintf('Itt senki nem vesz meg ilyet: „%s”.', $item),
+                'kinalat' => array_map(fn ($l) => $ctx->npcs->tradeView($l, $w, $ctx, $names), $lines),
+            ]];
+        }
+
+        return [$match[0], []];
+    }
+
+    private function moneyUnit(Context $ctx): string
+    {
+        $money = $ctx->state->moneyStat();
+        foreach ($ctx->state->statsView() as $st) {
+            if ($st['id'] === $money) {
+                return (string) ($st['egyseg'] ?? '');
+            }
+        }
+
+        return '';
+    }
+
+    private function afterTrade(Context $ctx, array $trade, int $qty): void
+    {
+        $ctx->state->increment('keszlet:'.$trade['id'], $qty);
+        if ($trade['trader_type'] === 'npc') {
+            $ctx->state->increment('vasarlas:'.$trade['trader_id']);
+            if ($ctx->state->relation($trade['trader_id']) < 10) {
+                $ctx->state->addRelation($trade['trader_id'], 1);
+            }
+        }
+        $ctx->passTime(self::MINUTES['vesz']);
+    }
+
+    private function npcView(Context $ctx, array $npc, array $topics): array
+    {
+        $names = $this->locationNames($ctx->gameId());
+
+        return array_filter([
+            'nev'          => $npc['name'],
+            'leiras'       => $npc['description'],
+            'szemelyiseg'  => $npc['personality'],
+            'mai_kedve'    => Npcs::MOODS[$ctx->npcs->mood($npc['id'], $ctx)],
+            'kapcsolat'    => $ctx->state->relation($npc['id']),
+            'temak'        => $this->topicList($ctx, $topics),
+            'kinalat'      => array_values(array_map(fn ($l) => $ctx->npcs->tradeView($l, $ctx->world, $ctx, $names),
+                array_filter($ctx->npcs->tradesHere($ctx), fn ($l) => $l['trader_type'] === 'npc' && $l['trader_id'] === $npc['id']))) ?: null,
+            'utmutatas'    => 'Beszélj a szereplő nevében, a személyisége és a mai kedve szerint. Csak a témáiban szereplő tényeket mondhatja el; '
+                .'ha a játékos egy témáról kérdez, hívd a beszel eszközt a téma nevével.',
+        ], fn ($v) => $v !== null && $v !== '');
+    }
+
+    private function topicList(Context $ctx, array $topics): array
+    {
+        return array_map(fn ($t) => ['cim' => $t['title'], 'elhangzott' => (bool) $ctx->state->flag('_tema:'.$t['id'])], $topics);
+    }
+
+    private function npcNotFound(string $query, array $alternatives): array
+    {
+        return $alternatives
+            ? ['siker' => false, 'esemeny' => sprintf('Nincs itt ilyen szereplő: „%s”.', $query), 'itt_van' => $alternatives]
+            : ['siker' => false, 'esemeny' => 'Itt most nincs senki, akivel beszélni lehetne.'];
+    }
+
+    /** @return array<string, string> */
+    private function locationNames(string $gameId): array
+    {
+        $stmt = $this->db->prepare('SELECT id, name FROM locations WHERE game_id = ?');
+        $stmt->execute([$gameId]);
+
+        return $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+    }
+
+    // =====================================================================
     //  A test: alvás, pihenés, tisztálkodás, várakozás
     // =====================================================================
 
@@ -697,6 +961,7 @@ final class GameEngine
 
         $ctx = new Context($playerId, $game, $settings, $state, $world, $save['location_id'], (int) $save['game_minute']);
         $ctx->rules = new Rules($this->db, $game['id']);
+        $ctx->npcs = new Npcs($this->db, $game['id']);
         $stmt = $this->db->prepare('SELECT id, features FROM locations WHERE game_id = ?');
         $stmt->execute([$game['id']]);
         foreach ($stmt->fetchAll() as $l) {
@@ -939,6 +1204,8 @@ final class GameEngine
             'nyitvatartas'  => $loc['open_hours'] ?: null,
             'kijaratok'     => $exits,
             'targyak'       => $ctx->world->locationTree($locationId),
+            'szereplok'     => array_map(fn ($n) => ['nev' => $n['name'], 'leiras' => $n['description']], $ctx->npcs->present($ctx)) ?: null,
+            'kereskedes'    => array_map(fn ($l) => $ctx->npcs->tradeView($l, $ctx->world, $ctx, $this->locationNames($gameId)), $ctx->npcs->tradesHere($ctx)) ?: null,
             'kep'           => $this->imageFor($gameId, $loc, $ctx->state, $ctx->minute),
         ], fn ($v) => $v !== null);
     }
@@ -973,6 +1240,7 @@ final class GameEngine
             'napszak'       => $ctx->dayPart(),
             'tulajdonsagok' => $ctx->state->statsView(),
             'leltar'        => $ctx->world->inventoryTree(),
+            'szereplok'     => array_map(fn ($n) => $n['nev'], $loc['szereplok'] ?? []),
             'itt'           => array_map(fn ($n) => ['nev' => $n['nev'], 'darab' => $n['darab']], $ctx->world->locationTree($ctx->location)),
             'kijaratok'     => array_map(
                 fn (array $e) => ['irany' => Direction::label($e['irany']), 'celpont' => $e['celpont'], 'akadaly' => !empty($e['akadaly'])],

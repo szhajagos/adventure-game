@@ -231,6 +231,16 @@ final class State
         return $v === null ? null : (float) $v;
     }
 
+    /** Egy előtagú számlálók nullázása (pl. „keszlet:” a reggeli készletpótláskor) */
+    public function resetPrefix(string $prefix): void
+    {
+        foreach (array_keys($this->data['counters']) as $k) {
+            if (str_starts_with((string) $k, $prefix)) {
+                unset($this->data['counters'][$k]);
+            }
+        }
+    }
+
     /** Éjfélkor: a „napi_” kezdetű számlálók nullázódnak (pl. napi_pihenes) */
     public function resetDaily(): void
     {

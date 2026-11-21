@@ -54,6 +54,7 @@
   .chip small { color: var(--muted); font-size: 10px; margin-right: 4px; text-transform: uppercase; letter-spacing: .04em; }
   .chip em { color: var(--muted); font-style: normal; }
   .chip.ground { border-style: dashed; }
+  .chip.person { border-color: var(--acc, #8f86ff); }
   .exits { color: var(--muted); font-size: 12px; }
   .exits .locked { opacity: .55; }
   .end { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column;
@@ -237,10 +238,13 @@
     }
 
     const here = $('here'); here.replaceChildren();
+    for (const n of p.szereplok || []) {
+      const s = document.createElement('span'); s.className = 'chip person'; s.textContent = '👤 ' + n; here.append(s);
+    }
     for (const it of p.itt || []) {
       const s = document.createElement('span'); s.className = 'chip ground'; s.textContent = name(it); here.append(s);
     }
-    $('hereRow').hidden = !(p.itt || []).length;
+    $('hereRow').hidden = !((p.itt || []).length + (p.szereplok || []).length);
 
     // A játék vége
     const end = p.vege;

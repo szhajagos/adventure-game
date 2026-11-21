@@ -46,6 +46,15 @@ final class ServerFactory
           tisztálkodhat (tisztalkodik); ha valamire várni akar (pl. a bolt nyitására), a var eszköz telteti az időt.
         - Ha egy hely zárva van, a válasz megmondja a nyitvatartást; javasolhatod, hogy a játékos várjon.
 
+        Szereplők és kereskedés:
+        - A helyszín „szereplok” listája mutatja, ki van jelen. Ha a játékos megszólít valakit, hívd a beszel eszközt;
+          a válasz adatlapja (személyiség, mai kedv, kapcsolat, témák) alapján beszélj a szereplő nevében, élőbeszédben.
+        - A szereplő csak a témáiban szereplő tényeket tudja. Ha a játékos valamelyikre rákérdez, hívd a beszel eszközt
+          a „tema” mezővel, és a „valasz” tartalmát mondd el a szereplő hangján. Csevegni szabadon lehet, de új tényt,
+          ígéretet, ajándékot vagy árat ne találj ki.
+        - Vásárlás: vesz, eladás: elad, ajándék vagy kért tárgy átadása: odaad. Az árakat és a készletet a „kereskedes”
+          vagy a „kinalat” lista adja; alkudozni nem lehet, a szereplő kedve és a kapcsolat már benne van az árban.
+
         Események és a játék vége:
         - Az „esemenyek” lista a játék szabályaiból jön: ezek megtörtént dolgok, mindig sződ bele őket a mesébe.
         - A „valtozasok” lista a tulajdonságok változása; ha jelentős, említsd meg.
@@ -53,8 +62,14 @@ final class ServerFactory
         - Ha a válaszban „vege” mező van, a játék véget ért: kövesd a „teendo” mezőt. Győzelem után nincs több lépés;
           vereség után felajánlhatod a vissza_ellenorzo_ponthoz eszközt.
 
+        Nyelv:
+        - A játék adatai magyarul vannak, de mindig a játékos nyelvén mesélj: ha a játékos angolul (vagy más nyelven) ír,
+          azon a nyelven meséld el a történetet, a helyszíneket, a tárgyakat és a szereplők szavait.
+        - Az eszközök paramétereiben viszont mindig a válaszokban szereplő magyar nevet és irányt add meg
+          (pl. „bread” → „fél kenyér”, „north” → „eszak”).
+
         Mesélés:
-        - Mindig magyarul, második személyben, élvezetes, de tömör prózában meséld el, mi történik (2–5 mondat).
+        - Második személyben, élvezetes, de tömör prózában meséld el, mi történik (2–5 mondat).
         - Kövesd az adott játék „meseloi_stilus” mezőjében megadott hangnemet.
         - Új játék kezdetén (ha az eszköz „bevezeto” szöveget ad) először azt meséld el a saját szavaiddal.
         - A játékos szabad szöveges parancsait fordítsd le a játék eszközeire (pl. „menjünk a kút felé” → menj).
@@ -78,7 +93,7 @@ final class ServerFactory
         $panel  = ['ui' => new UiToolMeta(resourceUri: self::PANEL_URI, visibility: [ToolVisibility::Model, ToolVisibility::App])];
 
         return Server::builder()
-            ->setServerInfo('MCP Adventure', '0.5.0')
+            ->setServerInfo('MCP Adventure', '0.6.0')
             ->setInstructions(self::INSTRUCTIONS)
             ->enableExtension(new McpApps())
             ->addResource(
@@ -233,6 +248,57 @@ final class ServerFactory
                 description: 'A játékos megeszik vagy megiszik valamit, ami nála vagy a helyszínen van.',
                 annotations: new ToolAnnotations(title: 'Elfogyaszt', readOnlyHint: false, destructiveHint: false),
                 inputSchema: self::schema(['targy' => ['string', 'Az étel vagy ital neve.']], ['targy']),
+            )
+            ->addTool(
+                fn (string $szereplo, ?string $tema = null): array => $engine->talk($playerId, $szereplo, $tema),
+                name: 'beszel',
+                meta: $panel,
+                title: 'Beszél',
+                description: 'A játékos megszólít egy jelen lévő szereplőt. Téma nélkül a szereplő adatlapját és a témáit adja vissza; '
+                    .'témával azt, amit a szereplő arról elmond.',
+                annotations: new ToolAnnotations(title: 'Beszél', readOnlyHint: false, destructiveHint: false),
+                inputSchema: self::schema([
+                    'szereplo' => ['string', 'A szereplő neve, ahogy a helyszín leírásában szerepel.'],
+                    'tema'     => ['string', 'A téma címe a szereplő témalistájából, vagy a játékos kérdése néhány szóban.'],
+                ], ['szereplo']),
+            )
+            ->addTool(
+                fn (string $targy, string $szereplo): array => $engine->give($playerId, $targy, $szereplo),
+                name: 'odaad',
+                meta: $panel,
+                title: 'Odaad',
+                description: 'A játékos odaad egy nála lévő tárgyat egy jelen lévő szereplőnek (pl. kérésre, ajándékba).',
+                annotations: new ToolAnnotations(title: 'Odaad', readOnlyHint: false, destructiveHint: false),
+                inputSchema: self::schema([
+                    'targy'    => ['string', 'A nála lévő tárgy neve.'],
+                    'szereplo' => ['string', 'A szereplő neve.'],
+                ], ['targy', 'szereplo']),
+            )
+            ->addTool(
+                fn (string $targy, ?int $darab = null, ?string $kitol = null): array => $engine->buy($playerId, $targy, $darab, $kitol),
+                name: 'vesz',
+                meta: $panel,
+                title: 'Vesz',
+                description: 'A játékos megvesz valamit egy itteni árustól vagy automatából (pénzért, vagy ha a kínálat úgy szól, cserébe).',
+                annotations: new ToolAnnotations(title: 'Vesz', readOnlyHint: false, destructiveHint: false),
+                inputSchema: self::schema([
+                    'targy' => ['string', 'A tárgy neve a kínálatból.'],
+                    'darab' => ['integer', 'Hány darabot (alapból 1).'],
+                    'kitol' => ['string', 'Csak ha több árus is van itt: kitől.'],
+                ], ['targy']),
+            )
+            ->addTool(
+                fn (string $targy, ?int $darab = null, ?string $kinek = null): array => $engine->sell($playerId, $targy, $darab, $kinek),
+                name: 'elad',
+                meta: $panel,
+                title: 'Elad',
+                description: 'A játékos elad egy nála lévő tárgyat egy itteni felvásárlónak (szereplőnek vagy automatának).',
+                annotations: new ToolAnnotations(title: 'Elad', readOnlyHint: false, destructiveHint: false),
+                inputSchema: self::schema([
+                    'targy' => ['string', 'A nála lévő tárgy neve.'],
+                    'darab' => ['integer', 'Hány darabot (alapból mindet, amennyit ma átvesznek).'],
+                    'kinek' => ['string', 'Csak ha több felvásárló is van itt: kinek.'],
+                ], ['targy']),
             )
             ->addTool(
                 fn (?int $ora = null): array => $engine->sleep($playerId, $ora),

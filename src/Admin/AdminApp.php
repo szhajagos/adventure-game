@@ -86,6 +86,8 @@ final class AdminApp
                 'item'     => $this->pageItem(),
                 'stat'     => $this->pageStat(),
                 'rule'     => $this->pageRule(),
+                'npc'      => $this->pageNpc(),
+                'topic'    => $this->pageTopic(),
                 'export'   => $this->export(),
                 default    => $this->pageHome(),
             };
@@ -240,6 +242,9 @@ final class AdminApp
             .'Új tulajdonság a meglévő mentésekben a kezdőértékével jelenik meg.</p>'
             .'<div class="actions"><a class="btn" href="'.View::e(View::url(['p' => 'stat', 'g' => $gid])).'">+ Új tulajdonság</a></div><br>'
             .$this->statsTable($gid)
+            .'<h2>Szereplők</h2><p class="muted">Akikkel a játékos beszélhet, kereskedhet. A mesélő az adatlapjuk alapján beszél a nevükben.</p>'
+            .'<div class="actions"><a class="btn" href="'.View::e(View::url(['p' => 'npc', 'g' => $gid])).'">+ Új szereplő</a></div><br>'
+            .$this->npcsTable($gid)
             .'<h2>Szabályok</h2><p class="muted">Mi történjen, ha a játékos valamit csinál: <i>kiváltó művelet → feltételek → hatások → üzenet a mesélőnek</i>.</p>'
             .'<div class="actions"><a class="btn" href="'.View::e(View::url(['p' => 'rule', 'g' => $gid])).'">+ Új szabály</a></div><br>'
             .$this->rulesTable($gid)
@@ -390,6 +395,7 @@ final class AdminApp
             .$exitForm
             .'<h2>Tárgyak a helyszínen (a játék elején)</h2>'.($trows ? '<table><tr><th>Tárgy</th><th>Darab</th><th></th></tr>'.$trows.'</table>' : '<p class="muted">Nincs itt tárgy.</p>')
             .$itemForm
+            .'<h2>Kereskedés a helyszínen (automata, bolt szereplő nélkül)</h2>'.$this->tradesBlock($gid, 'location', $lid)
             .'<h2>Veszélyzóna</h2>'
             .($isStart ? '<p class="muted">A kezdő helyszín nem törölhető.</p>'
                 : View::postButton('Helyszín törlése', ['a' => 'delete_loc', 'g' => $gid, 'l' => $lid], 'Biztosan törlöd a helyszínt a kijárataival és tárgyaival együtt?', 'btn danger'));
@@ -499,6 +505,7 @@ final class AdminApp
                 $this->db->beginTransaction();
                 $this->db->prepare('DELETE FROM exits WHERE game_id = ? AND (from_location = ? OR to_location = ?)')->execute([$gid, $lid, $lid]);
                 $this->db->prepare('DELETE FROM location_items WHERE game_id = ? AND location_id = ?')->execute([$gid, $lid]);
+                $this->db->prepare('DELETE FROM trades WHERE game_id = ? AND trader_type = ? AND trader_id = ?')->execute([$gid, 'location', $lid]);
                 $this->db->prepare('DELETE FROM locations WHERE game_id = ? AND id = ?')->execute([$gid, $lid]);
                 $this->db->commit();
                 $this->removeImages($gid, $lid);
@@ -592,6 +599,11 @@ final class AdminApp
                 if ((int) $stmt->fetchColumn() > 0) {
                     $this->fail('Ez a tárgy szerepel játékosok mentésében, ezért most nem törölhető.');
                 }
+                $stmt = $this->db->prepare('SELECT COUNT(*) FROM trades WHERE game_id = ? AND (item_id = ? OR price_item_id = ?)');
+                $stmt->execute([$gid, $iid, $iid]);
+                if ((int) $stmt->fetchColumn() > 0) {
+                    $this->fail('Ezt a tárgyat valaki árulja vagy felvásárolja; előbb töröld a kereskedési sorát.');
+                }
                 $this->db->prepare('DELETE FROM location_items WHERE game_id = ? AND item_id = ?')->execute([$gid, $iid]);
                 $this->db->prepare('DELETE FROM items WHERE game_id = ? AND id = ?')->execute([$gid, $iid]);
                 $this->ok('A tárgy törölve.', ['p' => 'game', 'g' => $gid]);
@@ -603,6 +615,37 @@ final class AdminApp
                 $this->requireGame($gid);
                 $this->db->prepare('DELETE FROM game_stats WHERE game_id = ? AND id = ?')->execute([$gid, (string) ($_POST['s'] ?? '')]);
                 $this->ok('A tulajdonság törölve. (A mentésekben tárolt értéke megmarad, de a játék nem használja.)', ['p' => 'game', 'g' => $gid]);
+
+            case 'save_npc':
+                $this->saveNpc($gid);
+
+            case 'delete_npc':
+                $this->requireGame($gid);
+                $nid = (string) ($_POST['n'] ?? '');
+                $this->db->beginTransaction();
+                $this->db->prepare('DELETE FROM trades WHERE game_id = ? AND trader_type = ? AND trader_id = ?')->execute([$gid, 'npc', $nid]);
+                $this->db->prepare('DELETE FROM npc_topics WHERE game_id = ? AND npc_id = ?')->execute([$gid, $nid]);
+                $this->db->prepare('DELETE FROM npcs WHERE game_id = ? AND id = ?')->execute([$gid, $nid]);
+                $this->db->commit();
+                $this->ok('A szereplő törölve.', ['p' => 'game', 'g' => $gid]);
+
+            case 'save_topic':
+                $this->saveTopic($gid);
+
+            case 'delete_topic':
+                $this->requireGame($gid);
+                $nid = (string) ($_POST['n'] ?? '');
+                $this->db->prepare('DELETE FROM npc_topics WHERE game_id = ? AND npc_id = ? AND id = ?')->execute([$gid, $nid, (int) ($_POST['t'] ?? 0)]);
+                $this->ok('A téma törölve.', ['p' => 'npc', 'g' => $gid, 'n' => $nid]);
+
+            case 'add_trade':
+                $this->addTrade($gid);
+
+            case 'delete_trade':
+                $this->requireGame($gid);
+                $this->db->prepare('DELETE FROM trades WHERE game_id = ? AND id = ?')->execute([$gid, (int) ($_POST['id'] ?? 0)]);
+                [$bt, $bid] = explode(':', (string) ($_POST['back'] ?? 'location:'), 2) + ['', ''];
+                $this->ok('Kereskedési sor törölve.', $bt === 'npc' ? ['p' => 'npc', 'g' => $gid, 'n' => $bid] : ['p' => 'loc', 'g' => $gid, 'l' => $bid]);
 
             case 'save_settings':
                 $this->saveSettings($gid);
@@ -836,6 +879,7 @@ final class AdminApp
         $out = "-- MCP Adventure – a(z) „{$game['title']}” játék exportja\n-- Készült: ".date('Y-m-d H:i:s')."\n"
             ."-- Betöltés: phpMyAdmin → Importálás. Ha a játék már létezik, előbb töröld (lásd lent).\nSET NAMES utf8mb4;\n\n"
             ."-- DELETE FROM location_items WHERE game_id = ".$q($gid)."; DELETE FROM exits WHERE game_id = ".$q($gid).";\n"
+            ."-- DELETE FROM trades WHERE game_id = ".$q($gid)."; DELETE FROM npc_topics WHERE game_id = ".$q($gid)."; DELETE FROM npcs WHERE game_id = ".$q($gid).";\n"
             ."-- DELETE FROM rules WHERE game_id = ".$q($gid)."; DELETE FROM game_stats WHERE game_id = ".$q($gid)."; DELETE FROM items WHERE game_id = ".$q($gid)."; DELETE FROM locations WHERE game_id = ".$q($gid)."; DELETE FROM games WHERE id = ".$q($gid).";\n\n";
 
         $tables = [
@@ -845,6 +889,9 @@ final class AdminApp
             'game_stats'     => ['SELECT * FROM game_stats WHERE game_id = ? ORDER BY sort_order, id', []],
             'items'          => ['SELECT * FROM items WHERE game_id = ? ORDER BY id', []],
             'location_items' => ['SELECT * FROM location_items WHERE game_id = ? ORDER BY location_id, item_id', []],
+            'npcs'           => ['SELECT * FROM npcs WHERE game_id = ? ORDER BY sort_order, id', []],
+            'npc_topics'     => ['SELECT game_id, npc_id, title, keywords, content, conditions, effects, sort_order FROM npc_topics WHERE game_id = ? ORDER BY npc_id, sort_order, id', []],
+            'trades'         => ['SELECT game_id, trader_type, trader_id, mode, item_id, price, price_item_id, daily_limit, conditions, sort_order FROM trades WHERE game_id = ? ORDER BY id', []],
             'rules'          => ['SELECT game_id, name, trigger_action, conditions, effects, message, once, priority, active FROM rules WHERE game_id = ? ORDER BY priority, id', []],
         ];
         foreach ($tables as $table => [$sql]) {
@@ -1005,6 +1052,251 @@ final class AdminApp
     }
 
     // =====================================================================
+    //  Szereplők, témák, kereskedés
+    // =====================================================================
+
+    private function npcsTable(string $gid): string
+    {
+        $stmt = $this->db->prepare('SELECT n.*, (SELECT COUNT(*) FROM npc_topics t WHERE t.game_id = n.game_id AND t.npc_id = n.id) AS topic_count,
+            (SELECT COUNT(*) FROM trades r WHERE r.game_id = n.game_id AND r.trader_type = \'npc\' AND r.trader_id = n.id) AS trade_count
+            FROM npcs n WHERE n.game_id = ? ORDER BY n.sort_order, n.name');
+        $stmt->execute([$gid]);
+        $rows = '';
+        foreach ($stmt->fetchAll() as $n) {
+            $rows .= '<tr><td><a href="'.View::e(View::url(['p' => 'npc', 'g' => $gid, 'n' => $n['id']])).'"><b>'.View::e($n['name']).'</b></a>'
+                .'<div class="mono muted">'.View::e($n['id']).'</div></td><td>'.View::e(self::scheduleText($n['schedule'])).'</td>'
+                .'<td>'.$n['topic_count'].' téma</td><td>'.$n['trade_count'].' kereskedési sor</td></tr>';
+        }
+
+        return $rows ? '<table><tr><th>Szereplő</th><th>Hol és mikor</th><th>Témák</th><th>Kereskedés</th></tr>'.$rows.'</table>'
+                     : '<p class="muted">Még nincs szereplő.</p>';
+    }
+
+    /** A beosztás szövegként: soronként „helyszín 06:00-18:00” (idő nélkül: mindig ott van) */
+    private static function scheduleText(string $json): string
+    {
+        $lines = [];
+        foreach (json_decode($json, true) ?: [] as $s) {
+            $lines[] = trim(($s['helyszin'] ?? '').' '.(isset($s['tol'], $s['ig']) ? $s['tol'].'-'.$s['ig'] : ''));
+        }
+
+        return implode("\n", $lines);
+    }
+
+    private function pageNpc(): void
+    {
+        $game = $this->requireGame((string) ($_GET['g'] ?? ''));
+        $gid = $game['id'];
+        $nid = (string) ($_GET['n'] ?? '');
+        $npc = null;
+        if ($nid !== '') {
+            $stmt = $this->db->prepare('SELECT * FROM npcs WHERE game_id = ? AND id = ?');
+            $stmt->execute([$gid, $nid]);
+            $npc = $stmt->fetch() ?: $this->notFound();
+        }
+        $isNew = $npc === null;
+        $npc ??= ['id' => '', 'name' => '', 'description' => '', 'personality' => '', 'schedule' => '[]', 'sort_order' => 100];
+        $locIds = implode(', ', array_column($this->locationsOf($gid), 'id'));
+
+        $body = '<form method="post" class="card">'.View::csrf().'<input type="hidden" name="a" value="save_npc"><input type="hidden" name="g" value="'.View::e($gid).'">'
+            .($isNew ? '<input type="hidden" name="new" value="1">'.View::field('Azonosító (kisbetű, szám, aláhúzás)', 'n', '', 'text', ['required' => true, 'pattern' => '[a-z0-9_]{1,50}'])
+                     : '<input type="hidden" name="n" value="'.View::e($npc['id']).'"><p class="mono muted">Azonosító: '.View::e($npc['id']).'</p>')
+            .View::field('Név (ahogy a játékban megjelenik)', 'name', $npc['name'], 'text', ['required' => true, 'maxlength' => 100])
+            .View::field('Külső (amit a játékos lát)', 'description', $npc['description'], 'textarea', ['rows' => 2])
+            .View::field('Személyiség és beszédstílus (a mesélőnek)', 'personality', $npc['personality'], 'textarea', ['rows' => 3])
+            .View::field('Hol és mikor van (soronként: helyszín_id 06:00-18:00; idő nélkül: mindig ott van)', 'schedule', self::scheduleText($npc['schedule']), 'textarea',
+                ['rows' => 3, 'class' => 'mono', 'placeholder' => 'pekseg 06:00-19:00'])
+            .'<p class="muted" style="font-size:13px">Helyszínek: <span class="mono">'.View::e($locIds).'</span></p>'
+            .View::field('Sorrend', 'sort_order', $npc['sort_order'], 'number')
+            .'<button class="btn">'.($isNew ? 'Szereplő létrehozása' : 'Mentés').'</button></form>';
+
+        if (!$isNew) {
+            $stmt = $this->db->prepare('SELECT * FROM npc_topics WHERE game_id = ? AND npc_id = ? ORDER BY sort_order, id');
+            $stmt->execute([$gid, $nid]);
+            $trows = '';
+            foreach ($stmt->fetchAll() as $t) {
+                $trows .= '<tr><td><a href="'.View::e(View::url(['p' => 'topic', 'g' => $gid, 'n' => $nid, 't' => $t['id']])).'"><b>'.View::e($t['title']).'</b></a>'
+                    .'<div class="muted">'.View::e((string) $t['keywords']).'</div></td><td>'.View::e(mb_strimwidth($t['content'], 0, 140, '…')).'</td>'
+                    .'<td class="mono">'.View::e($t['conditions'] === '[]' ? '' : $t['conditions']).'</td><td class="mono">'.View::e($t['effects'] === '[]' ? '' : $t['effects']).'</td></tr>';
+            }
+            $body .= '<h2>Beszélgetési témák</h2><p class="muted">Amit a szereplő tud és elmond. Az első elmondáskor a hatások érvényesülnek (pl. a játékos megtud valamit: jelző).</p>'
+                .'<div class="actions"><a class="btn" href="'.View::e(View::url(['p' => 'topic', 'g' => $gid, 'n' => $nid])).'">+ Új téma</a></div><br>'
+                .($trows ? '<table><tr><th>Téma</th><th>Amit elmond</th><th>Feltételek</th><th>Hatások</th></tr>'.$trows.'</table>' : '<p class="muted">Még nincs téma.</p>')
+                .'<h2>Kereskedés</h2>'.$this->tradesBlock($gid, 'npc', $nid)
+                .'<h2>Veszélyzóna</h2>'.View::postButton('Szereplő törlése', ['a' => 'delete_npc', 'g' => $gid, 'n' => $nid], 'Biztosan törlöd a szereplőt a témáival és a kereskedésével együtt?', 'btn danger');
+        }
+
+        $title = $isNew ? 'Új szereplő' : $npc['name'];
+        echo View::layout($title, $body, $this->user, $this->takeFlash(),
+            ['Játékok' => '/admin/', $game['title'] => View::url(['p' => 'game', 'g' => $gid]), $title => null]);
+    }
+
+    private function saveNpc(string $gid): never
+    {
+        $this->requireGame($gid);
+        $nid = (string) ($_POST['n'] ?? '');
+        $name = trim((string) ($_POST['name'] ?? ''));
+        if ($name === '') {
+            $this->fail('A név kötelező.');
+        }
+        $locs = array_column($this->locationsOf($gid), 'id');
+        $schedule = [];
+        foreach (preg_split('/\R/', trim((string) ($_POST['schedule'] ?? ''))) as $line) {
+            $line = trim($line);
+            if ($line === '') {
+                continue;
+            }
+            if (!preg_match('/^([a-z0-9_]+)(?:\s+([0-2]?\d:[0-5]\d)\s*[-–]\s*([0-2]?\d:[0-5]\d))?$/u', $line, $m)) {
+                $this->fail('A beosztás sorainak formája: helyszín_id 06:00-18:00 (hibás sor: „'.$line.'”).');
+            }
+            if (!in_array($m[1], $locs, true)) {
+                $this->fail('Nincs ilyen helyszín: „'.$m[1].'”.');
+            }
+            $schedule[] = isset($m[2]) && $m[2] !== '' ? ['helyszin' => $m[1], 'tol' => $m[2], 'ig' => $m[3]] : ['helyszin' => $m[1]];
+        }
+        $vals = [$name, trim((string) ($_POST['description'] ?? '')), trim((string) ($_POST['personality'] ?? '')),
+            json_encode($schedule, JSON_UNESCAPED_UNICODE), (int) ($_POST['sort_order'] ?? 100)];
+        if (!empty($_POST['new'])) {
+            $this->validId($nid, 'szereplő');
+            $stmt = $this->db->prepare('SELECT 1 FROM npcs WHERE game_id = ? AND id = ?');
+            $stmt->execute([$gid, $nid]);
+            if ($stmt->fetchColumn()) {
+                $this->fail('Ilyen azonosítójú szereplő már van.');
+            }
+            $this->db->prepare('INSERT INTO npcs (name, description, personality, schedule, sort_order, game_id, id) VALUES (?, ?, ?, ?, ?, ?, ?)')->execute([...$vals, $gid, $nid]);
+            $this->ok('A szereplő elkészült. Adj hozzá témákat és kereskedést.', ['p' => 'npc', 'g' => $gid, 'n' => $nid]);
+        }
+        $this->db->prepare('UPDATE npcs SET name = ?, description = ?, personality = ?, schedule = ?, sort_order = ? WHERE game_id = ? AND id = ?')->execute([...$vals, $gid, $nid]);
+        $this->ok('Mentve.', ['p' => 'npc', 'g' => $gid, 'n' => $nid]);
+    }
+
+    private function pageTopic(): void
+    {
+        $game = $this->requireGame((string) ($_GET['g'] ?? ''));
+        $gid = $game['id'];
+        $nid = (string) ($_GET['n'] ?? '');
+        $stmt = $this->db->prepare('SELECT * FROM npcs WHERE game_id = ? AND id = ?');
+        $stmt->execute([$gid, $nid]);
+        $npc = $stmt->fetch() ?: $this->notFound();
+        $tid = (int) ($_GET['t'] ?? 0);
+        $topic = null;
+        if ($tid > 0) {
+            $stmt = $this->db->prepare('SELECT * FROM npc_topics WHERE game_id = ? AND npc_id = ? AND id = ?');
+            $stmt->execute([$gid, $nid, $tid]);
+            $topic = $stmt->fetch() ?: $this->notFound();
+        }
+        $isNew = $topic === null;
+        $topic ??= ['id' => 0, 'title' => '', 'keywords' => '', 'content' => '', 'conditions' => '[]', 'effects' => '[]', 'sort_order' => 100];
+        $pretty = fn (string $j) => ($d = json_decode($j, true)) ? json_encode($d, JSON_UNESCAPED_UNICODE) : '';
+
+        $body = '<form method="post" class="card">'.View::csrf().'<input type="hidden" name="a" value="save_topic"><input type="hidden" name="g" value="'.View::e($gid).'">'
+            .'<input type="hidden" name="n" value="'.View::e($nid).'"><input type="hidden" name="t" value="'.(int) $topic['id'].'">'
+            .View::field('Téma címe', 'title', $topic['title'], 'text', ['required' => true, 'maxlength' => 150])
+            .View::field('Kulcsszavak (vesszővel; a játékos szavai, amelyekre előjön)', 'keywords', (string) $topic['keywords'], 'text')
+            .View::field('Amit a szereplő elmond (a mesélő a saját szavaival, a szereplő hangján adja elő)', 'content', $topic['content'], 'textarea', ['rows' => 4, 'required' => true])
+            .View::field('Feltételek (JSON; mikor hajlandó beszélni róla – pl. [{"kapcsolat": ["pek", ">=", 3]}])', 'conditions', $pretty((string) $topic['conditions']), 'text', ['class' => 'mono'])
+            .View::field('Hatások az első elmondáskor (JSON; pl. [{"jelzo": ["tudja_a_titkot", true]}])', 'effects', $pretty((string) $topic['effects']), 'text', ['class' => 'mono'])
+            .View::field('Sorrend', 'sort_order', $topic['sort_order'], 'number')
+            .'<button class="btn">'.($isNew ? 'Téma létrehozása' : 'Mentés').'</button></form>'
+            .($isNew ? '' : '<h2>Veszélyzóna</h2>'.View::postButton('Téma törlése', ['a' => 'delete_topic', 'g' => $gid, 'n' => $nid, 't' => $topic['id']], 'Törlöd a témát?', 'btn danger'));
+
+        $title = $isNew ? 'Új téma' : $topic['title'];
+        echo View::layout($title, $body, $this->user, $this->takeFlash(),
+            ['Játékok' => '/admin/', $game['title'] => View::url(['p' => 'game', 'g' => $gid]), $npc['name'] => View::url(['p' => 'npc', 'g' => $gid, 'n' => $nid]), $title => null]);
+    }
+
+    private function saveTopic(string $gid): never
+    {
+        $this->requireGame($gid);
+        $nid = (string) ($_POST['n'] ?? '');
+        $tid = (int) ($_POST['t'] ?? 0);
+        $title = trim((string) ($_POST['title'] ?? ''));
+        $content = trim((string) ($_POST['content'] ?? ''));
+        if ($title === '' || $content === '') {
+            $this->fail('A cím és a tartalom kötelező.');
+        }
+        $conds = trim((string) ($_POST['conditions'] ?? '')) ?: '[]';
+        $effects = trim((string) ($_POST['effects'] ?? '')) ?: '[]';
+        if ($errors = array_merge(Rules::validate($conds, Rules::CONDITIONS, 'feltételek'), Rules::validate($effects, Rules::EFFECTS, 'hatások'))) {
+            $this->fail(implode(' ', $errors));
+        }
+        $norm = fn (string $j) => json_encode(json_decode($j, true), JSON_UNESCAPED_UNICODE);
+        $vals = [$title, trim((string) ($_POST['keywords'] ?? '')) ?: null, $content, $norm($conds), $norm($effects), (int) ($_POST['sort_order'] ?? 100)];
+        if ($tid > 0) {
+            $this->db->prepare('UPDATE npc_topics SET title = ?, keywords = ?, content = ?, conditions = ?, effects = ?, sort_order = ? WHERE game_id = ? AND npc_id = ? AND id = ?')
+                ->execute([...$vals, $gid, $nid, $tid]);
+        } else {
+            $this->db->prepare('INSERT INTO npc_topics (title, keywords, content, conditions, effects, sort_order, game_id, npc_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+                ->execute([...$vals, $gid, $nid]);
+        }
+        $this->ok('A téma mentve.', ['p' => 'npc', 'g' => $gid, 'n' => $nid]);
+    }
+
+    /** Egy kereskedő (szereplő vagy helyszín) kereskedési sorai és az új sor űrlapja */
+    private function tradesBlock(string $gid, string $type, string $traderId): string
+    {
+        $stmt = $this->db->prepare('SELECT t.*, i.name AS item_name, i.price AS base_price, p.name AS price_item_name FROM trades t
+            JOIN items i ON i.game_id = t.game_id AND i.id = t.item_id LEFT JOIN items p ON p.game_id = t.game_id AND p.id = t.price_item_id
+            WHERE t.game_id = ? AND t.trader_type = ? AND t.trader_id = ? ORDER BY t.mode, t.sort_order, t.id');
+        $stmt->execute([$gid, $type, $traderId]);
+        $unit = $this->moneyUnit($gid);
+        $rows = '';
+        foreach ($stmt->fetchAll() as $t) {
+            $price = $t['price_item_id'] !== null ? 'csere: '.$t['price_item_name']
+                : ($t['price'] !== null ? $t['price'].' '.$unit : $t['base_price'].' '.$unit.' (alapár)');
+            $rows .= '<tr><td>'.($t['mode'] === 'arul' ? 'árul' : 'felvásárol').'</td><td><b>'.View::e($t['item_name']).'</b></td><td>'.View::e($price).'</td>'
+                .'<td>'.($t['daily_limit'] === null ? 'korlátlan' : View::e($t['daily_limit']).' db / nap').'</td>'
+                .'<td class="mono">'.View::e($t['conditions'] === '[]' ? '' : $t['conditions']).'</td>'
+                .'<td>'.View::postButton('Törlés', ['a' => 'delete_trade', 'g' => $gid, 'id' => $t['id'], 'back' => $type.':'.$traderId], '', 'btn danger small').'</td></tr>';
+        }
+        $stmt = $this->db->prepare('SELECT id, name FROM items WHERE game_id = ? ORDER BY name');
+        $stmt->execute([$gid]);
+        $items = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+        if (!$items) {
+            return '<p class="muted">Ebben a játékban még nincs tárgy.</p>';
+        }
+
+        return ($rows ? '<table><tr><th>Mód</th><th>Tárgy</th><th>Ár</th><th>Keret</th><th>Feltétel</th><th></th></tr>'.$rows.'</table><br>' : '<p class="muted">Nincs kereskedés.</p>')
+            .'<form method="post" class="card">'.View::csrf().'<input type="hidden" name="a" value="add_trade"><input type="hidden" name="g" value="'.View::e($gid).'">'
+            .'<input type="hidden" name="type" value="'.View::e($type).'"><input type="hidden" name="trader" value="'.View::e($traderId).'">'
+            .'<div class="row">'.View::select('Mód', 'mode', ['arul' => 'árul (a játékos megveheti)', 'felvasarol' => 'felvásárol (a játékos eladhatja)'])
+            .View::select('Tárgy', 'item', $items)
+            .View::field('Ár ('.($unit ?: 'pénz').'; üres = a tárgy alapára)', 'price', '', 'number', ['min' => 0])
+            .View::field('Napi keret (db; üres = korlátlan)', 'limit', '', 'number', ['min' => 1]).'</div>'
+            .'<div class="row">'.View::select('Csere: pénz helyett ezt kéri', 'price_item', ['' => '– nem csere, pénzért –'] + $items)
+            .View::field('Feltétel (JSON; pl. [{"tulajdonsag": ["higienia", ">=", 10]}])', 'conds', '', 'text', ['class' => 'mono']).'</div>'
+            .'<p class="muted" style="font-size:13px">A szereplők árai a napi kedvük és a kapcsolat szerint ±10–20%-kal mozognak; a helyszín automatái mindig a megadott áron dolgoznak. '
+            .'A napi keret reggel (a játékszabályokban megadott órában) újraindul.</p>'
+            .'<button class="btn">Hozzáadás</button></form>';
+    }
+
+    private function addTrade(string $gid): never
+    {
+        $this->requireGame($gid);
+        $type = (string) ($_POST['type'] ?? '');
+        $trader = (string) ($_POST['trader'] ?? '');
+        $mode = (string) ($_POST['mode'] ?? '');
+        $back = $type === 'npc' ? ['p' => 'npc', 'g' => $gid, 'n' => $trader] : ['p' => 'loc', 'g' => $gid, 'l' => $trader];
+        if (!in_array($type, ['npc', 'location'], true) || !in_array($mode, ['arul', 'felvasarol'], true)) {
+            $this->fail('Hibás adatok.');
+        }
+        $conds = trim((string) ($_POST['conds'] ?? '')) ?: '[]';
+        if ($errors = Rules::validate($conds, Rules::CONDITIONS, 'feltételek')) {
+            $this->fail(implode(' ', $errors));
+        }
+        $priceItem = (string) ($_POST['price_item'] ?? '');
+        $price = trim((string) ($_POST['price'] ?? ''));
+        $limit = trim((string) ($_POST['limit'] ?? ''));
+        if ($priceItem !== '' && $mode !== 'arul') {
+            $this->fail('Cserét csak árulásnál lehet megadni (a játékos ad egy tárgyat a másikért).');
+        }
+        $this->db->prepare('INSERT INTO trades (game_id, trader_type, trader_id, mode, item_id, price, price_item_id, daily_limit, conditions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+            ->execute([$gid, $type, $trader, $mode, (string) ($_POST['item'] ?? ''), $price === '' ? null : max(0, (int) $price),
+                $priceItem === '' ? null : $priceItem, $limit === '' ? null : max(1, (int) $limit), json_encode(json_decode($conds, true), JSON_UNESCAPED_UNICODE)]);
+        $this->ok('Kereskedési sor hozzáadva.', $back);
+    }
+
+    // =====================================================================
     //  Játékszabályok (beállítások) és szabályok
     // =====================================================================
 
@@ -1048,6 +1340,10 @@ final class AdminApp
             .View::field('Pihenés naponta (alkalom)', 'rest_daily', (int) ($body['pihenes_naponta'] ?? 1), 'number', ['min' => 0, 'max' => 10])
             .'</div><p class="muted" style="font-size:13px">Ágynak az „agy”, mosdónak a „mosdo”, fürdőnek a „furdo” felszereltségű helyszín számít. '
             .'Az óránkénti hatásokat (pl. éhesen romlik a jókedv) „minden egész órában” kiváltójú szabályokkal adhatod meg.</p>'
+            .'<h3>Kereskedés</h3><div class="row">'
+            .View::field('Készletpótlás órája (a napi keretek ekkor indulnak újra)', 'restock', (int) ($s['keszletpotlas_ora'] ?? 6), 'number', ['min' => 0, 'max' => 23])
+            .View::select('Hírnév (globális reputáció) tulajdonság', 'reputation', $statOptionsBody, $s['reputacio'] ?? '')
+            .'</div>'
             .'<h3>A játék vége</h3>'
             .View::field('Győzelmi szöveg (ha a céltárgynak nincs saját befejező szövege)', 'win_text', (string) ($s['gyozelem_szoveg'] ?? ''), 'textarea', ['rows' => 2])
             .View::field('Vereség feltételei (JSON-lista: mindegyik elem egy lehetséges vereség, saját szöveggel)', 'defeat', $defeat === '[]' ? '' : $defeat, 'textarea',
@@ -1071,6 +1367,13 @@ final class AdminApp
             'pihenes'          => max(0, min(100, (float) ($_POST['rest_gain'] ?? 15))),
             'pihenes_naponta'  => max(0, min(10, (int) ($_POST['rest_daily'] ?? 1))),
         ];
+        $s['keszletpotlas_ora'] = max(0, min(23, (int) ($_POST['restock'] ?? 6)));
+        $rep = (string) ($_POST['reputation'] ?? '');
+        if ($rep === '') {
+            unset($s['reputacio']);
+        } else {
+            $s['reputacio'] = $rep;
+        }
         $win = trim((string) ($_POST['win_text'] ?? ''));
         if ($win === '') {
             unset($s['gyozelem_szoveg']);
@@ -1273,6 +1576,22 @@ final class AdminApp
         $stmt->execute([$gid]);
         foreach ($stmt->fetchAll() as $r) {
             array_push($out, ...$check((string) $r['conditions'], 'Szabály („'.View::e($r['name']).'”)'), ...$check((string) $r['effects'], 'Szabály („'.View::e($r['name']).'”)'));
+        }
+        $stmt = $this->db->prepare('SELECT name, schedule FROM npcs WHERE game_id = ?');
+        $stmt->execute([$gid]);
+        foreach ($stmt->fetchAll() as $n) {
+            foreach (json_decode((string) $n['schedule'], true) ?: [] as $slot) {
+                if (!in_array($slot['helyszin'] ?? '', $locIds, true)) {
+                    $out[] = sprintf('Szereplő („%s”): nincs ilyen helyszín a beosztásában: „%s”', View::e($n['name']), View::e($slot['helyszin'] ?? ''));
+                }
+            }
+        }
+        $stmt = $this->db->prepare('SELECT t.trader_id FROM trades t WHERE t.game_id = ? AND t.trader_type = \'location\'');
+        $stmt->execute([$gid]);
+        foreach ($stmt->fetchAll(PDO::FETCH_COLUMN) as $tl) {
+            if (!in_array($tl, $locIds, true)) {
+                $out[] = sprintf('Kereskedés: nincs ilyen helyszín: „%s”', View::e($tl));
+            }
         }
         $stmt = $this->db->prepare('SELECT from_location, direction, conditions FROM exits WHERE game_id = ? AND conditions IS NOT NULL');
         $stmt->execute([$gid]);
