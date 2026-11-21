@@ -19,6 +19,9 @@ final class GameEngine
 {
     private const IMAGE_EXTENSIONS = ['webp', 'jpg', 'jpeg', 'png'];
 
+    /** @var array<string, list<array>> */
+    private array $statDefCache = [];
+
     /**
      * @param string|null $imageDir  a helyszínképek mappája a szerveren (assets/images)
      * @param string|null $imageUrl  ugyanennek a mappának a nyilvános címe (https://…/assets/images)
@@ -151,22 +154,22 @@ final class GameEngine
         }
 
         $minutes = (int) $exit['minutes'];
-        $hunger  = self::clamp((int) $save['hunger'] + (int) ceil($minutes / 2));
-        $fatigue = self::clamp((int) $save['fatigue'] + (int) ceil($minutes / 3));
         $time    = (int) $save['game_minute'] + $minutes;
+        $state   = $this->state($save, $game['id']);
+        $firstVisit = !$state->visited($exit['to_location']);
+        $changes = $state->passTime($minutes);
+        $state->visit($exit['to_location']);
 
         $this->db->prepare(
-            'UPDATE saves SET location_id = ?, hunger = ?, fatigue = ?, game_minute = ? WHERE player_id = ? AND game_id = ?'
-        )->execute([$exit['to_location'], $hunger, $fatigue, $time, $playerId, $game['id']]);
+            'UPDATE saves SET location_id = ?, game_minute = ?, state = ? WHERE player_id = ? AND game_id = ?'
+        )->execute([$exit['to_location'], $time, $state->toJson(), $playerId, $game['id']]);
 
         return [
             'siker'      => true,
             'esemeny'    => sprintf('A játékos %s irányba indult (%s), az út %d percig tartott.',
                 Direction::label($dir), $exit['description'] ?? 'tovább', $minutes),
-            'valtozasok' => [
-                'ehseg'     => [(int) $save['hunger'], $hunger],
-                'faradtsag' => [(int) $save['fatigue'], $fatigue],
-            ],
+            'elso_latogatas' => $firstVisit,
+            'valtozasok' => $this->describeChanges($game['id'], $changes),
             'helyszin'   => $this->describeLocation($game['id'], $exit['to_location']),
             'ido'        => self::formatTime($time),
             'panel'      => $this->panel($playerId, $game),
@@ -196,10 +199,7 @@ final class GameEngine
             'jatek'     => $game['title'],
             'helyszin'  => $this->locationName($game['id'], $save['location_id']),
             'ido'       => self::formatTime((int) $save['game_minute']),
-            'penz'      => ['osszeg' => (int) $save['money'], 'egyseg' => $game['money_label']],
-            'ehseg'     => ['ertek' => (int) $save['hunger'], 'szoveg' => self::hungerLabel((int) $save['hunger'])],
-            'faradtsag' => ['ertek' => (int) $save['fatigue'], 'szoveg' => self::fatigueLabel((int) $save['fatigue'])],
-            'egeszseg'  => (int) $save['health'],
+            'tulajdonsagok' => $this->state($save, $game['id'])->statsView(),
             'leltar'    => $inventory,
             'panel'     => $this->panel($playerId, $game),
         ];
@@ -309,13 +309,39 @@ final class GameEngine
 
     private function createSave(int $playerId, array $game): void
     {
+        $state = State::initial($this->statDefs($game['id']), $game['start_location']);
         $this->db->prepare(
-            'INSERT INTO saves (player_id, game_id, location_id, money, hunger, fatigue, health, game_minute)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-        )->execute([
-            $playerId, $game['id'], $game['start_location'], $game['start_money'],
-            $game['start_hunger'], $game['start_fatigue'], $game['start_health'], $game['start_minute'],
-        ]);
+            'INSERT INTO saves (player_id, game_id, location_id, game_minute, state) VALUES (?, ?, ?, ?, ?)'
+        )->execute([$playerId, $game['id'], $game['start_location'], $game['start_minute'], $state->toJson()]);
+    }
+
+    /** A játék tulajdonság-definíciói (gyorsítótárazva egy kérésen belül) */
+    private function statDefs(string $gameId): array
+    {
+        if (!isset($this->statDefCache[$gameId])) {
+            $stmt = $this->db->prepare('SELECT * FROM game_stats WHERE game_id = ? ORDER BY sort_order, id');
+            $stmt->execute([$gameId]);
+            $this->statDefCache[$gameId] = $stmt->fetchAll();
+        }
+
+        return $this->statDefCache[$gameId];
+    }
+
+    private function state(array $save, string $gameId): State
+    {
+        return new State((string) $save['state'], $this->statDefs($gameId));
+    }
+
+    /** @param array<string, array{0:int,1:int}> $changes */
+    private function describeChanges(string $gameId, array $changes): array
+    {
+        $labels = array_column($this->statDefs($gameId), 'label', 'id');
+        $out = [];
+        foreach ($changes as $id => [$from, $to]) {
+            $out[] = ['tulajdonsag' => $labels[$id] ?? $id, 'elotte' => $from, 'utana' => $to];
+        }
+
+        return $out;
     }
 
     private function gameInfo(array $game): array
@@ -403,11 +429,7 @@ final class GameEngine
             'helyszin'  => $loc['nev'],
             'kep'       => $loc['kep'],
             'ido'       => self::formatTime((int) $save['game_minute']),
-            'penz'      => (int) $save['money'],
-            'egyseg'    => $game['money_label'],
-            'ehseg'     => (int) $save['hunger'],
-            'faradtsag' => (int) $save['fatigue'],
-            'egeszseg'  => (int) $save['health'],
+            'tulajdonsagok' => $this->state($save, $game['id'])->statsView(),
             'leltar'    => array_map(
                 fn (array $r) => ['nev' => $r['name'], 'darab' => (int) $r['quantity']],
                 $stmt->fetchAll()
@@ -464,30 +486,5 @@ final class GameEngine
         $s = strtr($s, ['á' => 'a', 'é' => 'e', 'í' => 'i', 'ó' => 'o', 'ö' => 'o', 'ő' => 'o', 'ú' => 'u', 'ü' => 'u', 'ű' => 'u']);
 
         return trim((string) preg_replace('/[^a-z0-9]+/', ' ', $s));
-    }
-
-    private static function clamp(int $v): int
-    {
-        return max(0, min(100, $v));
-    }
-
-    private static function hungerLabel(int $v): string
-    {
-        return match (true) {
-            $v <= 20 => 'jóllakott',
-            $v <= 50 => 'kicsit éhes',
-            $v <= 75 => 'éhes',
-            default  => 'nagyon éhes',
-        };
-    }
-
-    private static function fatigueLabel(int $v): string
-    {
-        return match (true) {
-            $v <= 20 => 'kipihent',
-            $v <= 50 => 'kicsit fáradt',
-            $v <= 75 => 'fáradt',
-            default  => 'kimerült',
-        };
     }
 }

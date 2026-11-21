@@ -1,14 +1,19 @@
 -- Játék: Ébredés a parkban
 SET NAMES utf8mb4;
 
-INSERT INTO games (id, title, description, intro, narrator_style, start_location,
-                   start_money, start_hunger, start_fatigue, start_health, start_minute, money_label, sort_order) VALUES
+INSERT INTO games (id, title, description, intro, narrator_style, start_location, start_minute, sort_order) VALUES
 ('ebredes',
  'Ébredés a parkban',
  'Egy nagyváros parkjában ébredsz, szinte üres zsebbel és emlékek nélkül. Szerezz pénzt, ételt és szállást, és építsd fel az életed a semmiből.',
  'Egy hideg, kora őszi reggelen egy parkban, egy kopott padon térsz magadhoz. Nem emlékszel, hogyan kerültél ide. A zsebedben néhány száz forint lapul.',
  'Realista, kissé melankolikus, de reményteli városi hangulat, időnként finom, száraz humorral. Rövid, érzékletes mondatok: hangok, szagok, hideg, éhség. A pénz és a megélhetés mindig fontos téma.',
- 'park_pad', 340, 45, 35, 90, 390, 'Ft', 10);
+ 'park_pad', 390, 10);
+
+INSERT INTO game_stats (game_id, id, label, kind, min_value, max_value, start_value, per_hour, unit, sort_order) VALUES
+('ebredes', 'penz',      'Pénz',      'money',         0, NULL, 340,  0, 'Ft', 10),
+('ebredes', 'ehseg',     'Éhség',     'bar_low_good',  0, 100,   45, 30, NULL, 20),
+('ebredes', 'faradtsag', 'Fáradtság', 'bar_low_good',  0, 100,   35, 20, NULL, 30),
+('ebredes', 'egeszseg',  'Egészség',  'bar_high_good', 0, 100,   90,  0, NULL, 40);
 
 INSERT INTO locations (game_id, id, name, description, image) VALUES
 ('ebredes', 'park_pad', 'Kopott pad a parkban',

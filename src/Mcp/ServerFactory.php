@@ -137,7 +137,7 @@ final class ServerFactory
                 name: 'allapot',
                 meta: $panel,
                 title: 'Állapot',
-                description: 'A játékos állapota az aktuális játékban: pénz, éhség, fáradtság, egészség, játékidő és leltár.',
+                description: 'A játékos állapota az aktuális játékban: a játék tulajdonságai (pl. pénz, éhség, oxigén), a játékidő és a leltár.',
                 annotations: new ToolAnnotations(title: 'Állapot', readOnlyHint: true),
                 inputSchema: $noArgs,
             )

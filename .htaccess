@@ -14,9 +14,9 @@ DirectoryIndex index.php index.html
 RedirectMatch 404 ^/(src|vendor|db|docker|config|\.git)(/|$)
 
 # --- 2. Érzékeny fájlok tiltása bárhol --------------------------------------
-#  rejtett fájlok (.env, .gitignore…), composer-fájlok, SQL, dokumentáció,
+#  rejtett fájlok (.env, .gitignore… – kivéve a szabványos .well-known mappát), composer-fájlok, SQL, dokumentáció,
 #  Docker- és egyéb konfigurációs fájlok, mentések, naplók
-<FilesMatch "(^\.|^composer\.(json|lock)$|^Dockerfile$|\.(sql|md|ya?ml|lock|dist|example|log|bak|old|sh|ini|conf)$)">
+<FilesMatch "(^\.(?!well-known$)|^composer\.(json|lock)$|^Dockerfile$|\.(sql|md|ya?ml|lock|dist|example|log|bak|old|sh|ini|conf)$)">
     Require all denied
 </FilesMatch>
 

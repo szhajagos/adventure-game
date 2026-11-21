@@ -12,14 +12,31 @@ CREATE TABLE games (
     intro           TEXT         NOT NULL,             -- a játék kezdetén elmondandó helyzet
     narrator_style  TEXT         NOT NULL,             -- hogyan meséljen az AI ebben a játékban
     start_location  VARCHAR(50)  NOT NULL,
-    start_money     INT          NOT NULL DEFAULT 0,
-    start_hunger    INT          NOT NULL DEFAULT 0,
-    start_fatigue   INT          NOT NULL DEFAULT 0,
-    start_health    INT          NOT NULL DEFAULT 100,
     start_minute    INT          NOT NULL DEFAULT 480, -- játékidő percben az 1. nap 0:00-tól
-    money_label     VARCHAR(20)  NOT NULL DEFAULT 'Ft',
     sort_order      INT          NOT NULL DEFAULT 0,
     active          TINYINT(1)   NOT NULL DEFAULT 1
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_hungarian_ci;
+
+-- A játék tulajdonságai (játékonként mások lehetnek: pénz, éhség, oxigén, hírnév…)
+--   kind: money          – pénz (a tárgyak ára ebben értendő; játékonként egy legyen)
+--         bar_low_good   – sáv, ahol a kevesebb a jobb (éhség, fáradtság)
+--         bar_high_good  – sáv, ahol a több a jobb (egészség, oxigén)
+--         number         – sima szám (pl. hírnév, pontszám)
+--         hidden         – rejtett érték, a panel nem mutatja
+--   per_hour: óránkénti változás a játékidő múlásával (pl. éhség +30/óra)
+CREATE TABLE game_stats (
+    game_id     VARCHAR(50)  NOT NULL,
+    id          VARCHAR(50)  NOT NULL,
+    label       VARCHAR(100) NOT NULL,
+    kind        ENUM('money', 'bar_low_good', 'bar_high_good', 'number', 'hidden') NOT NULL DEFAULT 'number',
+    min_value   INT          NULL,
+    max_value   INT          NULL,
+    start_value INT          NOT NULL DEFAULT 0,
+    per_hour    DECIMAL(8,2) NOT NULL DEFAULT 0,
+    unit        VARCHAR(20)  NULL,
+    sort_order  INT          NOT NULL DEFAULT 0,
+    PRIMARY KEY (game_id, id),
+    FOREIGN KEY (game_id) REFERENCES games(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_hungarian_ci;
 
 -- Helyszínek (játékonként)
@@ -83,11 +100,10 @@ CREATE TABLE saves (
     player_id   INT         NOT NULL,
     game_id     VARCHAR(50) NOT NULL,
     location_id VARCHAR(50) NOT NULL,
-    money       INT         NOT NULL DEFAULT 0,
-    hunger      INT         NOT NULL DEFAULT 0,    -- 0 = jóllakott, 100 = éhezik
-    fatigue     INT         NOT NULL DEFAULT 0,    -- 0 = kipihent, 100 = kimerült
-    health      INT         NOT NULL DEFAULT 100,  -- 0–100
     game_minute INT         NOT NULL DEFAULT 480,
+    -- Minden más, játékonként eltérő állapot JSON-ban:
+    -- {"stats":{…}, "flags":{…}, "relations":{…}, "counters":{…}, "visited":[…]}
+    state       LONGTEXT    NOT NULL DEFAULT '{}' CHECK (JSON_VALID(state)),
     started_at  TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at  TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (player_id, game_id),

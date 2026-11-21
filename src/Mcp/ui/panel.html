@@ -73,14 +73,11 @@
       <div class="caption" id="place"></div>
     </div>
 
-    <div class="stats">
-      <div class="stat"><label>Éhség <span id="hungerV"></span></label><div class="bar"><i id="hungerB"></i></div></div>
-      <div class="stat"><label>Fáradtság <span id="fatigueV"></span></label><div class="bar"><i id="fatigueB"></i></div></div>
-      <div class="stat"><label>Egészség <span id="healthV"></span></label><div class="bar"><i id="healthB"></i></div></div>
-    </div>
+    <div class="stats" id="stats"></div>
 
     <div class="row">
       <span class="money" id="money"></span>
+      <div class="chips" id="extra" hidden></div>
       <span class="label">Leltár</span>
       <div class="chips" id="inv"></div>
       <button class="music" id="music" hidden>♪ Hangulatzene</button>
@@ -140,15 +137,41 @@
     try { return t ? JSON.parse(t) : null; } catch { return null; }
   }
 
-  function color(v, higherIsBetter) {
-    const good = higherIsBetter ? v >= 60 : v <= 40;
-    const bad  = higherIsBetter ? v < 30  : v > 75;
+  function color(pct, higherIsBetter) {
+    const good = higherIsBetter ? pct >= 60 : pct <= 40;
+    const bad  = higherIsBetter ? pct < 30  : pct > 75;
     return good ? 'var(--good)' : bad ? 'var(--bad)' : 'var(--mid)';
   }
-  function bar(key, v, higherIsBetter) {
-    $(key + 'V').textContent = v + '/100';
-    $(key + 'B').style.width = Math.max(0, Math.min(100, v)) + '%';
-    $(key + 'B').style.background = color(v, higherIsBetter);
+
+  // A tulajdonságok játékonként mások: a „tipus” mondja meg, hogyan jelenjenek meg
+  function renderStats(list) {
+    const box = $('stats'); box.replaceChildren();
+    const money = [], extra = [];
+    for (const t of list || []) {
+      if (t.tipus === 'money') { money.push(t); continue; }
+      if (t.tipus === 'bar_low_good' || t.tipus === 'bar_high_good') {
+        const min = t.min ?? 0, max = t.max ?? 100;
+        const pct = max > min ? Math.round((t.ertek - min) / (max - min) * 100) : 0;
+        const d = document.createElement('div'); d.className = 'stat';
+        const l = document.createElement('label');
+        const v = document.createElement('span'); v.textContent = t.ertek + '/' + max;
+        l.append(t.nev, v);
+        const b = document.createElement('div'); b.className = 'bar';
+        const i = document.createElement('i'); i.style.width = Math.max(0, Math.min(100, pct)) + '%';
+        i.style.background = color(pct, t.tipus === 'bar_high_good');
+        b.append(i); d.append(l, b); box.append(d);
+        continue;
+      }
+      extra.push(t);
+    }
+    $('money').textContent = money.map((t) => t.ertek.toLocaleString('hu-HU') + ' ' + (t.egyseg || '')).join(' · ');
+    $('money').hidden = money.length === 0;
+    const ex = $('extra'); ex.replaceChildren();
+    for (const t of extra) {
+      const s = document.createElement('span'); s.className = 'chip';
+      s.textContent = t.nev + ': ' + t.ertek + (t.egyseg ? ' ' + t.egyseg : ''); ex.append(s);
+    }
+    ex.hidden = extra.length === 0;
   }
 
   let musicUrl = null;
@@ -178,10 +201,7 @@
       img.src = p.kep;
     } else { img.hidden = true; $('ph').hidden = false; }
 
-    bar('hunger', p.ehseg ?? 0, false);
-    bar('fatigue', p.faradtsag ?? 0, false);
-    bar('health', p.egeszseg ?? 0, true);
-    $('money').textContent = (p.penz ?? 0).toLocaleString('hu-HU') + ' ' + (p.egyseg || '');
+    renderStats(p.tulajdonsagok);
 
     const inv = $('inv'); inv.replaceChildren();
     const items = p.leltar || [];

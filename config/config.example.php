@@ -24,12 +24,20 @@ return [
     // Az MCP-végpontot elérő host-nevek, vesszővel elválasztva – a domained
     'MCP_ALLOWED_HOSTS' => 'play.mcpadventure.com',
 
-    // Tesztidőszaki védelem: titkos kulcs az MCP-címben → https://play.mcpadventure.com/mcp/<kulcs>
-    // Csak betűk, számok, kötőjel és aláhúzás. Üresen hagyva nincs védelem (csak helyi fejlesztéshez!).
+    // Titkos tesztkulcs: https://play.mcpadventure.com/mcp/<kulcs> bejelentkezés nélkül a PLAYER_ID
+    // tesztjátékosként játszik (fejlesztéshez). Ez a kulcs kell az első admin létrehozásához is.
+    // Csak betűk, számok, kötőjel és aláhúzás.
     'MCP_ACCESS_KEY' => '',
 
     // Prototípus: melyik játékos nevében fut az MCP-szerver
     'PLAYER_ID' => '1',
+
+    // Levelek feladója (regisztráció megerősítése, elfelejtett jelszó)
+    'MAIL_FROM'      => 'noreply@mcpadventure.com',
+    'MAIL_FROM_NAME' => 'MCP Adventure',
+
+    // Csak megerősített e-mail-címmel lehet az AI-t a fiókhoz kapcsolni ('1' = igen)
+    'REQUIRE_EMAIL_VERIFICATION' => '1',
 
     // Hibák részletes kiírása a tesztoldalon (élesben maradjon '0')
     'APP_DEBUG' => '0',

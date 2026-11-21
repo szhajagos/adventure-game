@@ -1,14 +1,20 @@
 -- Játék: Csend a Kepler-állomáson (kis bemutató a többjátékos szerkezethez)
 SET NAMES utf8mb4;
 
-INSERT INTO games (id, title, description, intro, narrator_style, start_location,
-                   start_money, start_hunger, start_fatigue, start_health, start_minute, money_label, sort_order) VALUES
+INSERT INTO games (id, title, description, intro, narrator_style, start_location, start_minute, sort_order) VALUES
 ('kepler',
  'Csend a Kepler-állomáson',
  'Egy elhagyatottnak tűnő űrállomáson ébredsz a hibernációból. Gyűjts alkatrészeket és kredit-zsetonokat, derítsd ki, hová tűnt a legénység, és juss haza. (Bemutató, még csak néhány helyszínnel.)',
  'A hibernációs kapszula fedele szisszenve felnyílik. A fények tompák, a levegő hideg és fémes ízű. Az állomás csendes – túlságosan is.',
  'Feszült, szűkszavú sci-fi hangulat, klasszikus űrkalandok stílusában. Gépzúgás, villódzó fények, rádiósercegés. A technikai részletek legyenek hihetők, de érthetők.',
- 'hibernacio', 0, 30, 60, 80, 0, 'kredit', 20);
+ 'hibernacio', 0, 20);
+
+-- A Kepler-állomáson más tulajdonságok számítanak, mint a parkban
+INSERT INTO game_stats (game_id, id, label, kind, min_value, max_value, start_value, per_hour, unit, sort_order) VALUES
+('kepler', 'kredit',    'Kredit',    'money',         0, NULL,   0,   0, 'kredit', 10),
+('kepler', 'oxigen',    'Oxigén',    'bar_high_good', 0, 100,  70, -12, NULL, 20),
+('kepler', 'faradtsag', 'Fáradtság', 'bar_low_good',  0, 100,  60,  15, NULL, 30),
+('kepler', 'egeszseg',  'Egészség',  'bar_high_good', 0, 100,  80,   0, NULL, 40);
 
 INSERT INTO locations (game_id, id, name, description, image) VALUES
 ('kepler', 'hibernacio', 'Hibernációs terem',

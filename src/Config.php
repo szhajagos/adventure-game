@@ -32,6 +32,18 @@ final class Config
         return $default;
     }
 
+    /** A játék nyilvános címe (pl. https://play.mcpadventure.com): APP_URL, vagy a kérés saját címe */
+    public static function appUrl(): string
+    {
+        $url = rtrim((string) self::get('APP_URL', ''), '/');
+        if ($url === '' && !empty($_SERVER['HTTP_HOST'])) {
+            $https = ($_SERVER['HTTPS'] ?? '') === 'on' || ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https';
+            $url = ($https ? 'https' : 'http').'://'.$_SERVER['HTTP_HOST'];
+        }
+
+        return $url;
+    }
+
     /** @return array<string, mixed> */
     private static function file(): array
     {
