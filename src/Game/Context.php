@@ -18,6 +18,8 @@ final class Context
     /** @var list<string> a művelet után létrehozandó ellenőrző pontok */
     public array $checkpoints = [];
     public ?string $blocked = null;
+    /** Hány szabály teljesült (az óránkéntiek és az éjféliek nélkül) – a menj_ide ennél áll meg */
+    public int $notable = 0;
     /** @var array<string, list<string>> helyszín => felszereltség */
     public array $featureMap = [];
     /** A szabálymotor: az óránkénti és az éjféli szabályokhoz kell */

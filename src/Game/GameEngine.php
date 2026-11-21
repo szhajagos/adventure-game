@@ -158,32 +158,142 @@ final class GameEngine
                 ];
             }
 
-            $event = ['muvelet' => 'menj', 'irany' => $dir];
-            $target = $this->locationRow($ctx->gameId(), $exit['to_location']);
-            if (!$ctx->isOpen($target['open_hours'] ?? null)) {
-                return ['siker' => false, 'esemeny' => sprintf('Zárva: %s (nyitvatartás: %s).', $target['name'], $target['open_hours'])];
-            }
-            $conds = $exit['conditions'] ? (json_decode((string) $exit['conditions'], true) ?: []) : [];
-            if ($conds && !Rules::check($conds, $ctx, $event)) {
-                return ['siker' => false, 'esemeny' => $exit['blocked_message'] ?: 'Arra most nem tudsz továbbmenni.'];
-            }
+            return $this->step($ctx, $exit);
+        });
+    }
 
-            $rules = $this->rules($ctx);
-            return $rules->around($ctx, $event, function () use ($ctx, $exit, $dir, $rules) {
-                $minutes = (int) $exit['minutes'];
-                $firstVisit = !$ctx->state->visited($exit['to_location']);
-                $ctx->passTime($minutes);
-                $ctx->location = $exit['to_location'];
-                $ctx->state->visit($exit['to_location']);
-                $rules->after($ctx, ['muvelet' => 'megerkezik']);
+    /** Egy lépés egy kijáraton át: nyitvatartás, feltétel, szabályok, idő, megérkezés. */
+    private function step(Context $ctx, array $exit): array
+    {
+        $dir = $exit['direction'];
+        $event = ['muvelet' => 'menj', 'irany' => $dir];
+        $target = $this->locationRow($ctx->gameId(), $exit['to_location']);
+        if (!$ctx->isOpen($target['open_hours'] ?? null)) {
+            return ['siker' => false, 'esemeny' => sprintf('Zárva: %s (nyitvatartás: %s).', $target['name'], $target['open_hours'])];
+        }
+        $conds = $exit['conditions'] ? (json_decode((string) $exit['conditions'], true) ?: []) : [];
+        if ($conds && !Rules::check($conds, $ctx, $event)) {
+            return ['siker' => false, 'esemeny' => $exit['blocked_message'] ?: 'Arra most nem tudsz továbbmenni.'];
+        }
 
+        $rules = $this->rules($ctx);
+
+        return $rules->around($ctx, $event, function () use ($ctx, $exit, $dir, $rules) {
+            $minutes = (int) $exit['minutes'];
+            $firstVisit = !$ctx->state->visited($exit['to_location']);
+            $ctx->passTime($minutes);
+            $ctx->location = $exit['to_location'];
+            $ctx->state->visit($exit['to_location']);
+            $rules->after($ctx, ['muvelet' => 'megerkezik']);
+
+            return [
+                'siker'          => true,
+                'esemeny'        => sprintf('A játékos %s irányba indult (%s), az út %d percig tartott.',
+                    Direction::label($dir), $exit['description'] ?? 'tovább', $minutes),
+                'elso_latogatas' => $firstVisit,
+                'perc'           => $minutes,
+            ];
+        });
+    }
+
+    /**
+     * Elmegy egy már bejárt helyszínre: a motor a legrövidebb utat keresi a bejárt helyszíneken át,
+     * és lépésenként végigmegy rajta. Megáll, ha útközben valami történik, egy hely zárva van,
+     * vagy egy kijárat nem járható.
+     */
+    public function goTo(int $playerId, string $place): array
+    {
+        return $this->run($playerId, 'menj', function (Context $ctx) use ($place) {
+            $stmt = $this->db->prepare('SELECT id, name FROM locations WHERE game_id = ?');
+            $stmt->execute([$ctx->gameId()]);
+            $known = array_filter($stmt->fetchAll(PDO::FETCH_KEY_PAIR), fn ($id) => $ctx->state->visited((string) $id), ARRAY_FILTER_USE_KEY);
+
+            $q = World::simplify($place);
+            $hits = [];
+            foreach ($known as $id => $name) {
+                $n = World::simplify($name);
+                if ($q !== '' && ($n === $q || World::simplify((string) $id) === $q)) {
+                    $hits = [$id => $name];
+                    break;
+                }
+                if ($q !== '' && (str_contains($n, $q) || str_contains($q, $n))) {
+                    $hits[$id] = $name;
+                }
+            }
+            if (count($hits) !== 1) {
                 return [
-                    'siker'          => true,
-                    'esemeny'        => sprintf('A játékos %s irányba indult (%s), az út %d percig tartott.',
-                        Direction::label($dir), $exit['description'] ?? 'tovább', $minutes),
-                    'elso_latogatas' => $firstVisit,
+                    'siker'     => false,
+                    'esemeny'   => $hits
+                        ? sprintf('Több bejárt helyszínre is illik: „%s”. Melyikre gondol a játékos?', $place)
+                        : sprintf('„%s”: ilyen helyen még nem járt a játékos (csak már bejárt helyre lehet így eljutni).', $place),
+                    'bejart_helyszinek' => array_values($hits ?: $known),
                 ];
-            });
+            }
+            $goal = (string) array_key_first($hits);
+            if ($goal === $ctx->location) {
+                return ['siker' => false, 'esemeny' => 'A játékos már itt van.'];
+            }
+
+            // Legrövidebb út (lépésszám szerint) a bejárt helyszíneken át
+            $stmt = $this->db->prepare('SELECT * FROM exits WHERE game_id = ?');
+            $stmt->execute([$ctx->gameId()]);
+            $edges = [];
+            foreach ($stmt->fetchAll() as $e) {
+                if (isset($known[$e['from_location']], $known[$e['to_location']])) {
+                    $edges[$e['from_location']][] = $e;
+                }
+            }
+            $prev = [$ctx->location => null];
+            $queue = [$ctx->location];
+            while ($queue && !isset($prev[$goal])) {
+                $cur = array_shift($queue);
+                foreach ($edges[$cur] ?? [] as $e) {
+                    if (!array_key_exists($e['to_location'], $prev)) {
+                        $prev[$e['to_location']] = $e;
+                        $queue[] = $e['to_location'];
+                    }
+                }
+            }
+            if (!isset($prev[$goal])) {
+                return ['siker' => false, 'esemeny' => sprintf('A játékos nem ismer utat innen ide: %s.', $known[$goal])];
+            }
+            $path = [];
+            for ($at = $goal; $prev[$at] !== null; $at = $prev[$at]['from_location']) {
+                array_unshift($path, $prev[$at]);
+            }
+
+            // Végigmegy lépésenként; megáll, ha valami történik
+            $route = [$known[$ctx->location]];
+            $minutes = 0;
+            foreach ($path as $i => $exit) {
+                $before = $ctx->notable;
+                $r = $this->step($ctx, $exit);
+                if (!$r['siker']) {
+                    return [
+                        'siker'   => $i > 0,
+                        'esemeny' => sprintf('A játékos elindult ide: %s (%s), de %s megállt. Ok: %s',
+                            $known[$goal], implode(' → ', $route), $i > 0 ? 'útközben itt' : 'rögtön az elején', $r['esemeny']),
+                        'megallt' => true,
+                    ];
+                }
+                $route[] = $known[$exit['to_location']];
+                $minutes += (int) $r['perc'];
+                $last = $i === count($path) - 1;
+                if (!$last && ($ctx->notable > $before || $ctx->checkpoints || $ctx->state->end() !== null)) {
+                    return [
+                        'siker'   => true,
+                        'esemeny' => sprintf('A játékos elindult ide: %s, de útközben (%s, %d perc után) valami történt, ezért megállt: %s. Meséld el, mi történt.',
+                            $known[$goal], implode(' → ', $route), $minutes, end($route)),
+                        'megallt' => true,
+                    ];
+                }
+            }
+
+            return [
+                'siker'   => true,
+                'esemeny' => sprintf('A játékos elsétált ide: %s (%s), az út %d percig tartott. Az útvonal ismerős, elég röviden elmesélni.',
+                    $known[$goal], implode(' → ', $route), $minutes),
+            ];
         });
     }
 
@@ -852,11 +962,14 @@ final class GameEngine
             $result['esemeny'] = $ctx->blocked;
         }
 
-        return $this->finish($ctx, $result, $withLocation || $ctx->location !== $before);
+        // Ugyanazon a helyszínen maradva a panel kicsi (kép nélküli); csak helyváltáskor és körülnézéskor teljes
+        $compact = $ctx->location === $before && !in_array($action, ['look', 'menj'], true);
+
+        return $this->finish($ctx, $result, $withLocation || $ctx->location !== $before, $compact);
     }
 
     /** Mentés, a játék végének ellenőrzése, és a válasz összeállítása. */
-    private function finish(Context $ctx, array $result, bool $withLocation = true): array
+    private function finish(Context $ctx, array $result, bool $withLocation = true, bool $compact = false): array
     {
         $wasEnded = $ctx->state->end() !== null;
         if (!$wasEnded) {
@@ -891,7 +1004,7 @@ final class GameEngine
                       .' Felajánlhatod a visszatérést az utolsó ellenőrző ponthoz (vissza_ellenorzo_ponthoz), vagy az újrakezdést (uj_jatek).',
             ];
         }
-        $result['panel'] = $this->panel($ctx);
+        $result['panel'] = $this->panel($ctx) + ['kompakt' => $compact && $ctx->state->end() === null];
 
         return $result;
     }

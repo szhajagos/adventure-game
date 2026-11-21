@@ -73,6 +73,8 @@ final class ServerFactory
         - Kövesd az adott játék „meseloi_stilus” mezőjében megadott hangnemet.
         - Új játék kezdetén (ha az eszköz „bevezeto” szöveget ad) először azt meséld el a saját szavaiddal.
         - A játékos szabad szöveges parancsait fordítsd le a játék eszközeire (pl. „menjünk a kút felé” → menj).
+        - Ha a játékos egy már bejárt, nem szomszédos helyre akar menni („vissza a padhoz”), egyetlen menj_ide hívást használj,
+          ne több menj-et egymás után.
 
         Szabályok:
         - A játék állapotát (helyszín, pénz, éhség, fáradtság, leltár, idő) KIZÁRÓLAG az eszközök eredménye határozza meg.
@@ -90,23 +92,27 @@ final class ServerFactory
     public static function create(GameEngine $engine, int $playerId, ?string $assetOrigin = null): Server
     {
         $noArgs = ['type' => 'object', 'properties' => new \stdClass()];
-        $panel  = ['ui' => new UiToolMeta(resourceUri: self::PANEL_URI, visibility: [ToolVisibility::Model, ToolVisibility::App])];
+        // A panel címében a tartalom ujjlenyomata: ha a panel.html változik, új címet kap,
+        // így a Claude (és más kliensek) nem a gyorsítótárazott régi változatot használják.
+        $panelHtml = (string) file_get_contents(__DIR__.'/ui/panel.html');
+        $panelUri = self::PANEL_URI.'-'.substr(sha1($panelHtml), 0, 10);
+        $panel  = ['ui' => new UiToolMeta(resourceUri: $panelUri, visibility: [ToolVisibility::Model, ToolVisibility::App])];
 
         return Server::builder()
-            ->setServerInfo('MCP Adventure', '0.6.0')
+            ->setServerInfo('MCP Adventure', '0.7.0')
             ->setInstructions(self::INSTRUCTIONS)
             ->enableExtension(new McpApps())
             ->addResource(
                 fn (): TextResourceContents => new TextResourceContents(
-                    uri: self::PANEL_URI,
+                    uri: $panelUri,
                     mimeType: McpApps::MIME_TYPE,
-                    text: (string) file_get_contents(__DIR__.'/ui/panel.html'),
+                    text: $panelHtml,
                     meta: ['ui' => new UiResourceContentMeta(
                         csp: new UiResourceCsp(resourceDomains: $assetOrigin ? [$assetOrigin] : []),
                         prefersBorder: false,
                     )],
                 ),
-                self::PANEL_URI,
+                $panelUri,
                 'panel',
                 title: 'Játékpanel',
                 description: 'A helyszín képe és a játékos adatai (pénz, éhség, fáradtság, leltár).',
@@ -248,6 +254,17 @@ final class ServerFactory
                 description: 'A játékos megeszik vagy megiszik valamit, ami nála vagy a helyszínen van.',
                 annotations: new ToolAnnotations(title: 'Elfogyaszt', readOnlyHint: false, destructiveHint: false),
                 inputSchema: self::schema(['targy' => ['string', 'Az étel vagy ital neve.']], ['targy']),
+            )
+            ->addTool(
+                fn (string $helyszin): array => $engine->goTo($playerId, $helyszin),
+                name: 'menj_ide',
+                meta: $panel,
+                title: 'Menj ide',
+                description: 'A játékos elmegy egy már bejárt helyszínre, akár több helyszínen át (pl. „menjünk vissza a padhoz”). '
+                    .'A szerver keresi meg az utat; ha útközben valami történik vagy egy hely zárva van, ott megáll. '
+                    .'Szomszédos helyszínre és ismeretlen irányba a menj eszközt használd.',
+                annotations: new ToolAnnotations(title: 'Menj ide', readOnlyHint: false, destructiveHint: false),
+                inputSchema: self::schema(['helyszin' => ['string', 'A bejárt helyszín neve, ahogy a játékban szerepelt.']], ['helyszin']),
             )
             ->addTool(
                 fn (string $szereplo, ?string $tema = null): array => $engine->talk($playerId, $szereplo, $tema),

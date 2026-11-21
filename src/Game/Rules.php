@@ -157,6 +157,9 @@ final class Rules
         if ($rule['once']) {
             $ctx->state->setFlag('_szabaly_'.$rule['id'], true);
         }
+        if (!in_array($rule['trigger_action'], ['orankent', 'ejfelkor'], true)) {
+            $ctx->notable++;
+        }
         self::apply($rule['effects'], $ctx, $event);
         if (!empty($rule['message'])) {
             $ctx->messages[] = (string) $rule['message'];
