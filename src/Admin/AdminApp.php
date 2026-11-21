@@ -6,6 +6,7 @@ namespace AdventureGame\Admin;
 
 use AdventureGame\Config;
 use AdventureGame\Game\Direction;
+use AdventureGame\Game\Rules;
 use PDO;
 use Throwable;
 
@@ -18,6 +19,8 @@ final class AdminApp
 {
     private const ID_PATTERN = '/^[a-z0-9_]{1,50}$/';
     private const IMAGE_EXT = ['webp', 'jpg', 'jpeg', 'png'];
+    private const FEATURES = ['fedett', 'szabadter', 'mosdo', 'furdo', 'agy', 'bolt', 'konyha', 'ules', 'aram', 'viz'];
+
     private const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
     private const LOCATION_GOAL = 50;
 
@@ -82,6 +85,7 @@ final class AdminApp
                 'loc_new'  => $this->pageLocationNew(),
                 'item'     => $this->pageItem(),
                 'stat'     => $this->pageStat(),
+                'rule'     => $this->pageRule(),
                 'export'   => $this->export(),
                 default    => $this->pageHome(),
             };
@@ -212,9 +216,14 @@ final class AdminApp
         $stmt->execute([$gid]);
         $irows = '';
         foreach ($stmt->fetchAll() as $i) {
-            $irows .= '<tr><td><a href="'.View::e(View::url(['p' => 'item', 'g' => $gid, 'i' => $i['id']])).'"><b>'.View::e($i['name']).'</b></a>'
-                .'<div class="mono muted">'.View::e($i['id']).'</div></td><td>'.View::e($i['price']).' '.View::e($this->moneyUnit($gid)).'</td>'
-                .'<td>'.($i['nutrition'] ? '+'.View::e($i['nutrition']).' jóllakottság' : '–').'</td></tr>';
+            $props = json_decode((string) $i['props'], true) ?: [];
+            $badges = (!empty($props['cel']) ? ' <span class="badge ok">céltárgy</span>' : '')
+                .(isset($props['tarolo']) ? ' <span class="badge">tároló: '.(int) ($props['tarolo']['kapacitas'] ?? 0).'</span>' : '')
+                .(!empty($props['nem_felveheto']) ? ' <span class="badge">nem felvehető</span>' : '');
+            $irows .= '<tr><td><a href="'.View::e(View::url(['p' => 'item', 'g' => $gid, 'i' => $i['id']])).'"><b>'.View::e($i['name']).'</b></a>'.$badges
+                .'<div class="mono muted">'.View::e($i['id']).'</div></td><td>'.View::e($i['size']).'</td><td>'.View::e(implode(', ', (array) ($props['cimkek'] ?? []))).'</td>'
+                .'<td>'.View::e($i['price']).' '.View::e($this->moneyUnit($gid)).'</td>'
+                .'<td>'.($i['nutrition'] ? View::e($i['nutrition']) : '–').'</td></tr>';
         }
 
         $count = count($locs);
@@ -226,11 +235,15 @@ final class AdminApp
             .'<h2>Helyszínek</h2><div class="actions"><a class="btn" href="'.View::e(View::url(['p' => 'loc_new', 'g' => $gid])).'">+ Új helyszín</a></div><br>'
             .($lrows ? '<table><tr><th>Kép</th><th>Helyszín</th><th>Kijáratok</th><th>Tárgyak</th></tr>'.$lrows.'</table>' : '<p class="muted">Még nincs helyszín.</p>')
             .'<h2>Tárgyak</h2><div class="actions"><a class="btn" href="'.View::e(View::url(['p' => 'item', 'g' => $gid])).'">+ Új tárgy</a></div><br>'
-            .($irows ? '<table><tr><th>Tárgy</th><th>Ár</th><th>Étel</th></tr>'.$irows.'</table>' : '<p class="muted">Még nincs tárgy.</p>')
+            .($irows ? '<table><tr><th>Tárgy</th><th>Méret</th><th>Címkék</th><th>Ár</th><th>Tápérték</th></tr>'.$irows.'</table>' : '<p class="muted">Még nincs tárgy.</p>')
             .'<h2>Tulajdonságok</h2><p class="muted">A játékos jellemzői ebben a játékban (pénz, éhség, oxigén, hírnév…). '
             .'Új tulajdonság a meglévő mentésekben a kezdőértékével jelenik meg.</p>'
             .'<div class="actions"><a class="btn" href="'.View::e(View::url(['p' => 'stat', 'g' => $gid])).'">+ Új tulajdonság</a></div><br>'
             .$this->statsTable($gid)
+            .'<h2>Szabályok</h2><p class="muted">Mi történjen, ha a játékos valamit csinál: <i>kiváltó művelet → feltételek → hatások → üzenet a mesélőnek</i>.</p>'
+            .'<div class="actions"><a class="btn" href="'.View::e(View::url(['p' => 'rule', 'g' => $gid])).'">+ Új szabály</a></div><br>'
+            .$this->rulesTable($gid)
+            .'<h2>Játékszabályok és a játék vége</h2>'.$this->settingsForm($game)
             .'<h2>A játék adatai</h2>'.$this->gameForm($game, $locs);
 
         echo View::layout($game['title'], $body, $this->user, $this->takeFlash(), ['Játékok' => '/admin/', $game['title'] => null]);
@@ -314,7 +327,10 @@ final class AdminApp
         foreach ($stmt->fetchAll() as $e) {
             $erows .= '<tr><td><b>'.View::e(Direction::label($e['direction'])).'</b> <span class="mono muted">'.View::e($e['direction']).'</span></td>'
                 .'<td><a href="'.View::e(View::url(['p' => 'loc', 'g' => $gid, 'l' => $e['to_location']])).'">'.View::e($e['target_name']).'</a></td>'
-                .'<td>'.View::e($e['description']).'</td><td>'.View::e($e['minutes']).' perc</td>'
+                .'<td>'.View::e($e['description'])
+                .($e['conditions'] ? '<div class="mono muted">feltétel: '.View::e($e['conditions']).'</div>' : '')
+                .($e['blocked_message'] ? '<div class="muted">ha nem teljesül: „'.View::e($e['blocked_message']).'”</div>' : '')
+                .'</td><td>'.View::e($e['minutes']).' perc</td>'
                 .'<td>'.View::postButton('Törlés', ['a' => 'delete_exit', 'g' => $gid, 'l' => $lid, 'dir' => $e['direction']], 'Törlöd ezt a kijáratot?', 'btn danger small').'</td></tr>';
         }
         $dirOptions = '';
@@ -327,6 +343,10 @@ final class AdminApp
             .View::select('Hová vezet', 'to', $locOptions)
             .View::field('Leírás (pl. „egy rozsdás kapu”)', 'edesc', '', 'text', ['maxlength' => 255])
             .View::field('Időtartam (perc)', 'minutes', 5, 'number', ['min' => 0, 'max' => 1440]).'</div>'
+            .'<details><summary>Feltételes kijárat (pl. zárt ajtó)</summary><div class="row">'
+            .View::field('Feltételek (JSON, ugyanúgy, mint a szabályoknál)', 'conditions', '', 'text', ['placeholder' => '[{"van_nala": "kulcs"}]', 'class' => 'mono'])
+            .View::field('Üzenet, ha nem teljesül', 'blocked', '', 'text', ['maxlength' => 255, 'placeholder' => 'Az ajtó zárva van.'])
+            .'</div><p class="muted" style="font-size:13px">Ugyanazzal az iránnyal újra felvéve a kijárat felülíródik – így módosítható a feltétel is.</p></details><br>'
             .'<label><input type="checkbox" name="reverse" value="1" checked> Visszafelé vezető kijárat is (az ellentétes iránnyal, ha van ilyen)</label><br><br>'
             .'<button class="btn">Kijárat hozzáadása</button></form>';
 
@@ -359,6 +379,11 @@ final class AdminApp
             .'<p class="mono muted">Azonosító: '.View::e($lid).($isStart ? ' · <span class="badge ok">kezdő helyszín</span>' : '').'</p>'
             .View::field('Név', 'name', $loc['name'], 'text', ['required' => true, 'maxlength' => 100])
             .View::field('Leírás (mit lát a játékos)', 'description', $loc['description'], 'textarea', ['required' => true, 'rows' => 6])
+            .View::field('Felszereltség (vesszővel elválasztott címkék, pl. fedett, mosdo, bolt, agy)', 'features',
+                implode(', ', json_decode((string) $loc['features'], true) ?: []), 'text', ['list' => 'featlist'])
+            .View::field('Nyitvatartás (pl. 06:00-19:00; több sáv vesszővel; üres = mindig nyitva)', 'open_hours', (string) ($loc['open_hours'] ?? ''), 'text',
+                ['placeholder' => '06:00-19:00'])
+            .'<datalist id="featlist">'.implode('', array_map(fn ($f) => '<option value="'.$f.'">', self::FEATURES)).'</datalist>'
             .'<button class="btn">Mentés</button></form>'
             .'</div><div class="card"><b>Kép</b><br><br>'.$imgBlock.'</div></div>'
             .'<h2>Kijáratok innen</h2>'.($erows ? '<table><tr><th>Irány</th><th>Hová</th><th>Leírás</th><th>Idő</th><th></th></tr>'.$erows.'</table><br>' : '<p class="muted">Még nincs kijárat.</p>')
@@ -385,7 +410,9 @@ final class AdminApp
             $item = $stmt->fetch() ?: $this->notFound();
         }
         $isNew = $item === null;
-        $item ??= ['id' => '', 'name' => '', 'description' => '', 'price' => 0, 'nutrition' => 0];
+        $item ??= ['id' => '', 'name' => '', 'description' => '', 'price' => 0, 'nutrition' => 0, 'size' => 1, 'props' => '{}'];
+        $pr = json_decode((string) $item['props'], true) ?: [];
+        $chk = fn (string $name, string $label, bool $on) => '<label style="display:block;margin:6px 0"><input type="checkbox" name="'.$name.'" value="1"'.($on ? ' checked' : '').'> '.$label.'</label>';
 
         $body = '<form method="post" class="card">'.View::csrf().'<input type="hidden" name="a" value="save_item"><input type="hidden" name="g" value="'.View::e($gid).'">'
             .($isNew ? '<input type="hidden" name="new" value="1">'.View::field('Azonosító (kisbetű, szám, aláhúzás)', 'i', '', 'text', ['required' => true, 'pattern' => '[a-z0-9_]{1,50}'])
@@ -393,7 +420,19 @@ final class AdminApp
             .View::field('Név (ahogy a játékban megjelenik)', 'name', $item['name'], 'text', ['required' => true, 'maxlength' => 100])
             .View::field('Leírás', 'description', $item['description'], 'textarea')
             .'<div class="row">'.View::field('Ár ('.($this->moneyUnit($gid) ?: 'pénz').')', 'price', $item['price'], 'number', ['min' => 0])
-            .View::field('Tápérték (ennyivel csökkenti az éhséget, 0 = nem étel)', 'nutrition', $item['nutrition'], 'number', ['min' => 0, 'max' => 100]).'</div>'
+            .View::field('Tápérték (0 = nem étel; a játékbeállításban megadott tulajdonságot változtatja)', 'nutrition', $item['nutrition'], 'number', ['min' => 0, 'max' => 100])
+            .View::field('Méret (zseb: '.($this->gameSettings($game)['zseb_kapacitas'] ?? 2).', egy kéz: '.($this->gameSettings($game)['kez_meret'] ?? 4).')', 'size', $item['size'], 'number', ['min' => 0, 'max' => 100]).'</div>'
+            .View::field('Címkék (vesszővel; pl. etel, ital, taska, papir, eszkoz, uveg)', 'tags', implode(', ', (array) ($pr['cimkek'] ?? [])), 'text')
+            .View::field('Amit alapos vizsgálat derít ki (megvizsgál)', 'examine', (string) ($pr['vizsgalat'] ?? ''), 'textarea', ['rows' => 3])
+            .'<h3>Tároló</h3><div class="row">'
+            .View::field('Befogadóképesség (0 = nem tároló)', 'cap', (int) ($pr['tarolo']['kapacitas'] ?? 0), 'number', ['min' => 0, 'max' => 1000])
+            .View::field('Csak ilyen címkéjű tárgyat fogad (vesszővel; üres = bármit)', 'accepts', implode(', ', (array) ($pr['tarolo']['befogad'] ?? [])), 'text')
+            .View::field('Csak ilyen tárolóban vihető (pl. folyadek)', 'needs', (string) ($pr['tarolot_igenyel'] ?? ''), 'text').'</div>'
+            .$chk('backpack', 'Hátizsák: a hátán viszi, nem foglal kezet', ($pr['hely'] ?? '') === 'hat')
+            .$chk('fixed', 'Nem vehető fel (bútor, nagy tárgy – de megvizsgálható, tárolóként használható)', !empty($pr['nem_felveheto']))
+            .'<h3>Céltárgy</h3>'
+            .$chk('goal', 'Céltárgy: ha a játékoshoz kerül, a játék győzelemmel véget ér', !empty($pr['cel']))
+            .View::field('Befejező szöveg (ezt meséli el az AI a győzelemkor)', 'ending', (string) ($pr['vege_szoveg'] ?? ''), 'textarea', ['rows' => 3])
             .'<button class="btn">'.($isNew ? 'Tárgy létrehozása' : 'Mentés').'</button></form>'
             .($isNew ? '' : '<h2>Veszélyzóna</h2>'.View::postButton('Tárgy törlése', ['a' => 'delete_item', 'g' => $gid, 'i' => $item['id']], 'Biztosan törlöd? A helyszínekről is eltűnik.', 'btn danger'));
 
@@ -437,7 +476,13 @@ final class AdminApp
                     $this->ok('A helyszín elkészült. Adj hozzá kijáratokat és képet.', ['p' => 'loc', 'g' => $gid, 'l' => $lid]);
                 }
                 $this->requireLocation($gid, $lid);
-                $this->db->prepare('UPDATE locations SET name = ?, description = ? WHERE game_id = ? AND id = ?')->execute([$name, $desc, $gid, $lid]);
+                $features = json_encode(self::csv((string) ($_POST['features'] ?? '')), JSON_UNESCAPED_UNICODE);
+                $open = trim((string) ($_POST['open_hours'] ?? ''));
+                if ($open !== '' && !preg_match('/^\s*([0-2]?\d:[0-5]\d\s*[-–]\s*[0-2]?\d:[0-5]\d\s*,?\s*)+$/u', $open)) {
+                    $this->fail('A nyitvatartás formája: 06:00-19:00 (több sáv vesszővel: 08:00-12:00, 14:00-18:00).');
+                }
+                $this->db->prepare('UPDATE locations SET name = ?, description = ?, features = ?, open_hours = ? WHERE game_id = ? AND id = ?')
+                    ->execute([$name, $desc, $features, $open === '' ? null : $open, $gid, $lid]);
                 $this->ok('Mentve.', ['p' => 'loc', 'g' => $gid, 'l' => $lid]);
 
             case 'delete_loc':
@@ -470,8 +515,13 @@ final class AdminApp
                 }
                 $minutes = max(0, min(1440, (int) ($_POST['minutes'] ?? 5)));
                 $desc = trim((string) ($_POST['edesc'] ?? '')) ?: null;
-                $this->db->prepare('REPLACE INTO exits (game_id, from_location, direction, to_location, description, minutes) VALUES (?, ?, ?, ?, ?, ?)')
-                    ->execute([$gid, $lid, $dir, $to, $desc, $minutes]);
+                $conds = trim((string) ($_POST['conditions'] ?? ''));
+                if ($errors = Rules::validate($conds, Rules::CONDITIONS, 'feltételek')) {
+                    $this->fail(implode(' ', $errors));
+                }
+                $blocked = trim((string) ($_POST['blocked'] ?? '')) ?: null;
+                $this->db->prepare('REPLACE INTO exits (game_id, from_location, direction, to_location, description, minutes, conditions, blocked_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+                    ->execute([$gid, $lid, $dir, $to, $desc, $minutes, $conds === '' || $conds === '[]' ? null : $conds, $blocked]);
                 $msg = 'Kijárat hozzáadva.';
                 if (!empty($_POST['reverse']) && isset(self::OPPOSITE[$dir])) {
                     $back = self::OPPOSITE[$dir];
@@ -516,7 +566,12 @@ final class AdminApp
                 if ($name === '') {
                     $this->fail('A név kötelező.');
                 }
-                $vals = [$name, trim((string) ($_POST['description'] ?? '')), max(0, (int) ($_POST['price'] ?? 0)), max(0, min(100, (int) ($_POST['nutrition'] ?? 0)))];
+                $stmt = $this->db->prepare('SELECT props FROM items WHERE game_id = ? AND id = ?');
+                $stmt->execute([$gid, $iid]);
+                $props = json_decode((string) ($stmt->fetchColumn() ?: '{}'), true) ?: [];
+                $props = $this->itemPropsFromPost($props);
+                $vals = [$name, trim((string) ($_POST['description'] ?? '')), max(0, (int) ($_POST['price'] ?? 0)), max(0, min(100, (int) ($_POST['nutrition'] ?? 0))),
+                    max(0, min(100, (int) ($_POST['size'] ?? 1))), json_encode($props ?: new \stdClass(), JSON_UNESCAPED_UNICODE)];
                 if (!empty($_POST['new'])) {
                     $this->validId($iid, 'tárgy');
                     $stmt = $this->db->prepare('SELECT 1 FROM items WHERE game_id = ? AND id = ?');
@@ -524,18 +579,18 @@ final class AdminApp
                     if ($stmt->fetchColumn()) {
                         $this->fail('Ilyen azonosítójú tárgy már van.');
                     }
-                    $this->db->prepare('INSERT INTO items (name, description, price, nutrition, game_id, id) VALUES (?, ?, ?, ?, ?, ?)')->execute([...$vals, $gid, $iid]);
+                    $this->db->prepare('INSERT INTO items (name, description, price, nutrition, size, props, game_id, id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')->execute([...$vals, $gid, $iid]);
                     $this->ok('A tárgy elkészült.', ['p' => 'game', 'g' => $gid]);
                 }
-                $this->db->prepare('UPDATE items SET name = ?, description = ?, price = ?, nutrition = ? WHERE game_id = ? AND id = ?')->execute([...$vals, $gid, $iid]);
+                $this->db->prepare('UPDATE items SET name = ?, description = ?, price = ?, nutrition = ?, size = ?, props = ? WHERE game_id = ? AND id = ?')->execute([...$vals, $gid, $iid]);
                 $this->ok('Mentve.', ['p' => 'item', 'g' => $gid, 'i' => $iid]);
 
             case 'delete_item':
                 $iid = (string) ($_POST['i'] ?? '');
-                $stmt = $this->db->prepare('SELECT COUNT(*) FROM save_items WHERE game_id = ? AND item_id = ?');
-                $stmt->execute([$gid, $iid]);
+                $stmt = $this->db->prepare('SELECT (SELECT COUNT(*) FROM save_items WHERE game_id = ? AND item_id = ?) + (SELECT COUNT(*) FROM item_instances WHERE game_id = ? AND item_id = ?)');
+                $stmt->execute([$gid, $iid, $gid, $iid]);
                 if ((int) $stmt->fetchColumn() > 0) {
-                    $this->fail('Ez a tárgy jelenleg játékosoknál van, ezért most nem törölhető.');
+                    $this->fail('Ez a tárgy szerepel játékosok mentésében, ezért most nem törölhető.');
                 }
                 $this->db->prepare('DELETE FROM location_items WHERE game_id = ? AND item_id = ?')->execute([$gid, $iid]);
                 $this->db->prepare('DELETE FROM items WHERE game_id = ? AND id = ?')->execute([$gid, $iid]);
@@ -548,6 +603,17 @@ final class AdminApp
                 $this->requireGame($gid);
                 $this->db->prepare('DELETE FROM game_stats WHERE game_id = ? AND id = ?')->execute([$gid, (string) ($_POST['s'] ?? '')]);
                 $this->ok('A tulajdonság törölve. (A mentésekben tárolt értéke megmarad, de a játék nem használja.)', ['p' => 'game', 'g' => $gid]);
+
+            case 'save_settings':
+                $this->saveSettings($gid);
+
+            case 'save_rule':
+                $this->saveRule($gid);
+
+            case 'delete_rule':
+                $this->requireGame($gid);
+                $this->db->prepare('DELETE FROM rules WHERE game_id = ? AND id = ?')->execute([$gid, (int) ($_POST['r'] ?? 0)]);
+                $this->ok('A szabály törölve.', ['p' => 'game', 'g' => $gid]);
 
             case 'upload_img':
                 $this->requireLocation($gid, $lid);
@@ -595,8 +661,25 @@ final class AdminApp
             // Alap tulajdonságok – a játék oldalán bármikor módosíthatók, bővíthetők
             $ins = $this->db->prepare('INSERT INTO game_stats (game_id, id, label, kind, min_value, max_value, start_value, per_hour, unit, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
             $ins->execute([$id, 'penz', 'Pénz', 'money', 0, null, 0, 0, 'Ft', 10]);
-            $ins->execute([$id, 'egeszseg', 'Egészség', 'bar_high_good', 0, 100, 100, 0, null, 20]);
-            $this->ok('A játék elkészült (egyelőre rejtett). Most hozd létre az első helyszínt – ez lesz a kezdő helyszín.', ['p' => 'loc_new', 'g' => $id]);
+            $ins->execute([$id, 'jokedv', 'Jókedv', 'bar_high_good', 0, 100, 60, 0, null, 20]);
+            $ins->execute([$id, 'jollakottsag', 'Jóllakottság', 'bar_high_good', 0, 100, 70, -5, null, 30]);
+            $ins->execute([$id, 'energia', 'Energia', 'bar_high_good', 0, 100, 80, -4, null, 40]);
+            $ins->execute([$id, 'higienia', 'Higiénia', 'bar_high_good', 0, 100, 80, -2, null, 50]);
+            $settings = [
+                'kez_meret' => 4, 'zseb_kapacitas' => 2,
+                'etkezes'   => ['tulajdonsag' => 'jollakottsag', 'irany' => 1],
+                'test'      => ['energia' => 'energia', 'higienia' => 'higienia', 'alvas_orankent' => 12, 'alvas_agy_nelkul' => 0.5, 'pihenes' => 15, 'pihenes_naponta' => 1],
+                'vereseg'   => [['feltetelek' => [['tulajdonsag' => ['jokedv', '<=', 0]], ['tulajdonsag' => ['jollakottsag', '<=', 0]], ['tulajdonsag' => ['energia', '<=', 0]]],
+                                 'szoveg' => 'Elfogyott minden erőd és reményed. A kaland itt véget ér.']],
+            ];
+            $this->db->prepare('UPDATE games SET settings = ? WHERE id = ?')->execute([json_encode($settings, JSON_UNESCAPED_UNICODE), $id]);
+            $rule = $this->db->prepare('INSERT INTO rules (game_id, name, trigger_action, conditions, effects, message, priority) VALUES (?, ?, ?, ?, ?, ?, ?)');
+            $rule->execute([$id, 'Az éhség rontja a kedvet', 'orankent', '[{"tulajdonsag":["jollakottsag","<=",0]}]', '[{"tulajdonsag":["jokedv",-5]}]', 'A játékos nagyon éhes, ez rontja a kedvét.', 10]);
+            $rule->execute([$id, 'A kimerültség rontja a kedvet', 'orankent', '[{"tulajdonsag":["energia","<=",0]}]', '[{"tulajdonsag":["jokedv",-5]}]', 'A játékos teljesen kimerült.', 10]);
+            $rule->execute([$id, 'A piszok rontja a kedvet', 'orankent', '[{"tulajdonsag":["higienia","<=",0]}]', '[{"tulajdonsag":["jokedv",-3]}]', 'A játékos koszosnak érzi magát.', 10]);
+            $rule->execute([$id, 'Jóllakottan, kipihenten jobb a kedv', 'orankent',
+                '[{"tulajdonsag":["jollakottsag",">=",50]},{"tulajdonsag":["energia",">=",40]},{"tulajdonsag":["higienia",">=",30]}]', '[{"tulajdonsag":["jokedv",2]}]', null, 20]);
+            $this->ok('A játék elkészült (egyelőre rejtett), a szokásos testi tulajdonságokkal és szabályokkal. Most hozd létre az első helyszínt – ez lesz a kezdő helyszín.', ['p' => 'loc_new', 'g' => $id]);
         }
 
         $start = (string) ($_POST['start_location'] ?? $existing['start_location']);
@@ -712,6 +795,22 @@ final class AdminApp
                 $items[] = ['warn', 'Hiányzik a játék '.$label.'.'];
             }
         }
+        $stmt = $this->db->prepare('SELECT id, props FROM items WHERE game_id = ?');
+        $stmt->execute([$gid]);
+        $itemIds = [];
+        $hasGoal = false;
+        foreach ($stmt->fetchAll() as $it) {
+            $itemIds[$it['id']] = true;
+            $hasGoal = $hasGoal || !empty((json_decode((string) $it['props'], true) ?: [])['cel']);
+        }
+        $stmt = $this->db->prepare('SELECT COUNT(*) FROM rules WHERE game_id = ? AND active = 1 AND effects LIKE ?');
+        $stmt->execute([$gid, '%jatek_vege%']);
+        if (!$hasGoal && !(int) $stmt->fetchColumn()) {
+            $items[] = ['warn', 'Nincs céltárgy és győzelmet hozó szabály sem: a játéknak még nincs vége.'];
+        }
+        foreach ($this->brokenReferences($gid, array_keys($itemIds), array_keys($names)) as $msg) {
+            $items[] = ['bad', $msg];
+        }
         if (count($locs) < self::LOCATION_GOAL) {
             $items[] = ['info', 'Még '.(self::LOCATION_GOAL - count($locs)).' helyszín hiányzik az 50-es célhoz.'];
         }
@@ -737,7 +836,7 @@ final class AdminApp
         $out = "-- MCP Adventure – a(z) „{$game['title']}” játék exportja\n-- Készült: ".date('Y-m-d H:i:s')."\n"
             ."-- Betöltés: phpMyAdmin → Importálás. Ha a játék már létezik, előbb töröld (lásd lent).\nSET NAMES utf8mb4;\n\n"
             ."-- DELETE FROM location_items WHERE game_id = ".$q($gid)."; DELETE FROM exits WHERE game_id = ".$q($gid).";\n"
-            ."-- DELETE FROM game_stats WHERE game_id = ".$q($gid)."; DELETE FROM items WHERE game_id = ".$q($gid)."; DELETE FROM locations WHERE game_id = ".$q($gid)."; DELETE FROM games WHERE id = ".$q($gid).";\n\n";
+            ."-- DELETE FROM rules WHERE game_id = ".$q($gid)."; DELETE FROM game_stats WHERE game_id = ".$q($gid)."; DELETE FROM items WHERE game_id = ".$q($gid)."; DELETE FROM locations WHERE game_id = ".$q($gid)."; DELETE FROM games WHERE id = ".$q($gid).";\n\n";
 
         $tables = [
             'games'          => ['SELECT * FROM games WHERE id = ?', []],
@@ -746,6 +845,7 @@ final class AdminApp
             'game_stats'     => ['SELECT * FROM game_stats WHERE game_id = ? ORDER BY sort_order, id', []],
             'items'          => ['SELECT * FROM items WHERE game_id = ? ORDER BY id', []],
             'location_items' => ['SELECT * FROM location_items WHERE game_id = ? ORDER BY location_id, item_id', []],
+            'rules'          => ['SELECT game_id, name, trigger_action, conditions, effects, message, once, priority, active FROM rules WHERE game_id = ? ORDER BY priority, id', []],
         ];
         foreach ($tables as $table => [$sql]) {
             $stmt = $this->db->prepare($sql);
@@ -902,6 +1002,285 @@ final class AdminApp
         $stmt->execute([$gid]);
 
         return $stmt->fetchAll();
+    }
+
+    // =====================================================================
+    //  Játékszabályok (beállítások) és szabályok
+    // =====================================================================
+
+    private function gameSettings(array $game): array
+    {
+        $s = json_decode((string) ($game['settings'] ?? '{}'), true);
+
+        return is_array($s) ? $s : [];
+    }
+
+    private function settingsForm(array $game): string
+    {
+        $gid = $game['id'];
+        $s = $this->gameSettings($game);
+        $stmt = $this->db->prepare('SELECT id, label FROM game_stats WHERE game_id = ? ORDER BY sort_order, id');
+        $stmt->execute([$gid]);
+        $statOptions = ['' => '– nincs (az étel nem hat semmire) –'];
+        foreach ($stmt->fetchAll() as $t) {
+            $statOptions[$t['id']] = $t['label'].' ('.$t['id'].')';
+        }
+        $eat = $s['etkezes'] ?? ['tulajdonsag' => '', 'irany' => 1];
+        $body = $s['test'] ?? ['energia' => '', 'higienia' => ''];
+        $statOptionsBody = array_merge(['' => '– nincs –'], array_slice($statOptions, 1, null, true));
+        $defeat = json_encode($s['vereseg'] ?? [], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+
+        return '<form method="post" class="card">'.View::csrf().'<input type="hidden" name="a" value="save_settings"><input type="hidden" name="g" value="'.View::e($gid).'">'
+            .'<div class="row">'
+            .View::field('Egy kézben vihető méret', 'hand', (int) ($s['kez_meret'] ?? 4), 'number', ['min' => 1, 'max' => 100])
+            .View::field('A zseb befogadóképessége', 'pocket', (int) ($s['zseb_kapacitas'] ?? 2), 'number', ['min' => 0, 'max' => 100])
+            .'</div><div class="row">'
+            .View::select('Az étel ezt a tulajdonságot változtatja', 'eat_stat', $statOptions, $eat['tulajdonsag'] ?? '')
+            .View::select('Irány', 'eat_dir', ['-1' => 'csökkenti (pl. éhség)', '1' => 'növeli (pl. jóllakottság)'], (string) ((int) ($eat['irany'] ?? -1) >= 0 ? 1 : -1))
+            .'</div>'
+            .'<h3>A test</h3><div class="row">'
+            .View::select('Energia (az alvás és a pihenés ezt tölti)', 'body_energy', $statOptionsBody, $body['energia'] ?? '')
+            .View::select('Higiénia (a tisztálkodás ezt állítja maximumra)', 'body_hygiene', $statOptionsBody, $body['higienia'] ?? '')
+            .'</div><div class="row">'
+            .View::field('Alvás: energia óránként, ágyban', 'sleep_rate', (float) ($body['alvas_orankent'] ?? 12), 'number', ['min' => 0, 'max' => 100, 'step' => '0.5'])
+            .View::field('Ágy nélkül ennyiszerese (pl. 0.5)', 'sleep_nobed', (float) ($body['alvas_agy_nelkul'] ?? 0.5), 'number', ['min' => 0, 'max' => 1, 'step' => '0.05'])
+            .View::field('Rövid pihenés: energia', 'rest_gain', (float) ($body['pihenes'] ?? 15), 'number', ['min' => 0, 'max' => 100])
+            .View::field('Pihenés naponta (alkalom)', 'rest_daily', (int) ($body['pihenes_naponta'] ?? 1), 'number', ['min' => 0, 'max' => 10])
+            .'</div><p class="muted" style="font-size:13px">Ágynak az „agy”, mosdónak a „mosdo”, fürdőnek a „furdo” felszereltségű helyszín számít. '
+            .'Az óránkénti hatásokat (pl. éhesen romlik a jókedv) „minden egész órában” kiváltójú szabályokkal adhatod meg.</p>'
+            .'<h3>A játék vége</h3>'
+            .View::field('Győzelmi szöveg (ha a céltárgynak nincs saját befejező szövege)', 'win_text', (string) ($s['gyozelem_szoveg'] ?? ''), 'textarea', ['rows' => 2])
+            .View::field('Vereség feltételei (JSON-lista: mindegyik elem egy lehetséges vereség, saját szöveggel)', 'defeat', $defeat === '[]' ? '' : $defeat, 'textarea',
+                ['rows' => 6, 'class' => 'mono', 'placeholder' => '[{"feltetelek": [{"tulajdonsag": ["egeszseg", "<=", 0]}], "szoveg": "Elfogytak az erőid."}]'])
+            .'<button class="btn">Mentés</button></form>';
+    }
+
+    private function saveSettings(string $gid): never
+    {
+        $game = $this->requireGame($gid);
+        $s = $this->gameSettings($game);
+        $s['kez_meret'] = max(1, min(100, (int) ($_POST['hand'] ?? 4)));
+        $s['zseb_kapacitas'] = max(0, min(100, (int) ($_POST['pocket'] ?? 2)));
+        $stat = (string) ($_POST['eat_stat'] ?? '');
+        $s['etkezes'] = ['tulajdonsag' => $stat, 'irany' => (int) ($_POST['eat_dir'] ?? -1) >= 0 ? 1 : -1];
+        $s['test'] = [
+            'energia'          => (string) ($_POST['body_energy'] ?? ''),
+            'higienia'         => (string) ($_POST['body_hygiene'] ?? ''),
+            'alvas_orankent'   => max(0, min(100, (float) ($_POST['sleep_rate'] ?? 12))),
+            'alvas_agy_nelkul' => max(0, min(1, (float) ($_POST['sleep_nobed'] ?? 0.5))),
+            'pihenes'          => max(0, min(100, (float) ($_POST['rest_gain'] ?? 15))),
+            'pihenes_naponta'  => max(0, min(10, (int) ($_POST['rest_daily'] ?? 1))),
+        ];
+        $win = trim((string) ($_POST['win_text'] ?? ''));
+        if ($win === '') {
+            unset($s['gyozelem_szoveg']);
+        } else {
+            $s['gyozelem_szoveg'] = $win;
+        }
+
+        $defeatJson = trim((string) ($_POST['defeat'] ?? ''));
+        $defeat = $defeatJson === '' ? [] : json_decode($defeatJson, true);
+        if (!is_array($defeat) || !array_is_list($defeat)) {
+            $this->fail('A vereség feltételei nem érvényes JSON-lista.');
+        }
+        foreach ($defeat as $i => $d) {
+            if (!is_array($d) || !isset($d['feltetelek']) || !is_array($d['feltetelek'])) {
+                $this->fail(sprintf('A vereség %d. elemében hiányzik a „feltetelek” lista.', $i + 1));
+            }
+            if ($errors = Rules::validate(json_encode($d['feltetelek']), Rules::CONDITIONS, 'feltételek')) {
+                $this->fail(implode(' ', $errors));
+            }
+        }
+        $s['vereseg'] = $defeat;
+
+        $this->db->prepare('UPDATE games SET settings = ? WHERE id = ?')->execute([json_encode($s, JSON_UNESCAPED_UNICODE), $gid]);
+        $this->ok('A játékszabályok mentve.', ['p' => 'game', 'g' => $gid]);
+    }
+
+    private function rulesTable(string $gid): string
+    {
+        $stmt = $this->db->prepare('SELECT * FROM rules WHERE game_id = ? ORDER BY trigger_action, priority, id');
+        $stmt->execute([$gid]);
+        $rows = '';
+        foreach ($stmt->fetchAll() as $r) {
+            $rows .= '<tr><td><a href="'.View::e(View::url(['p' => 'rule', 'g' => $gid, 'r' => $r['id']])).'"><b>'.View::e($r['name']).'</b></a>'
+                .($r['active'] ? '' : ' <span class="badge">kikapcsolva</span>').($r['once'] ? ' <span class="badge">egyszeri</span>' : '').'</td>'
+                .'<td>'.View::e(Rules::TRIGGERS[$r['trigger_action']] ?? $r['trigger_action']).'</td>'
+                .'<td class="mono">'.View::e($r['conditions']).'</td><td class="mono">'.View::e($r['effects']).'</td></tr>';
+        }
+
+        return $rows ? '<table><tr><th>Szabály</th><th>Amikor a játékos…</th><th>Feltételek</th><th>Hatások</th></tr>'.$rows.'</table>'
+                     : '<p class="muted">Még nincs szabály.</p>';
+    }
+
+    private function pageRule(): void
+    {
+        $game = $this->requireGame((string) ($_GET['g'] ?? ''));
+        $gid = $game['id'];
+        $rid = (int) ($_GET['r'] ?? 0);
+        $rule = null;
+        if ($rid > 0) {
+            $stmt = $this->db->prepare('SELECT * FROM rules WHERE game_id = ? AND id = ?');
+            $stmt->execute([$gid, $rid]);
+            $rule = $stmt->fetch() ?: $this->notFound();
+        }
+        $isNew = $rule === null;
+        $rule ??= ['id' => 0, 'name' => '', 'trigger_action' => 'megvizsgal', 'conditions' => '[]', 'effects' => '[]', 'message' => '', 'once' => 0, 'priority' => 100, 'active' => 1];
+        $pretty = fn (string $j) => ($d = json_decode($j, true)) ? json_encode($d, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT) : '';
+
+        $help = function (array $list): string {
+            $rows = '';
+            foreach ($list as $k => [$shape, $desc]) {
+                $rows .= '<tr><td class="mono">'.View::e($k).'</td><td class="mono">'.View::e($shape).'</td><td>'.View::e($desc).'</td></tr>';
+            }
+            return '<table><tr><th>Kulcs</th><th>Érték</th><th>Jelentés</th></tr>'.$rows.'</table>';
+        };
+
+        // Azonosítók a kéznél: tárgyak, helyszínek, tulajdonságok
+        $ids = [];
+        foreach (['items' => 'Tárgyak', 'locations' => 'Helyszínek', 'game_stats' => 'Tulajdonságok'] as $table => $label) {
+            $stmt = $this->db->prepare("SELECT id FROM $table WHERE game_id = ? ORDER BY id");
+            $stmt->execute([$gid]);
+            $ids[] = '<b>'.$label.':</b> <span class="mono">'.View::e(implode(', ', $stmt->fetchAll(PDO::FETCH_COLUMN)) ?: '–').'</span>';
+        }
+
+        $body = '<form method="post" class="card">'.View::csrf().'<input type="hidden" name="a" value="save_rule"><input type="hidden" name="g" value="'.View::e($gid).'">'
+            .'<input type="hidden" name="r" value="'.(int) $rule['id'].'">'
+            .View::field('A szabály neve (csak neked)', 'name', $rule['name'], 'text', ['required' => true, 'maxlength' => 150])
+            .'<div class="row">'.View::select('Amikor a játékos…', 'trigger', Rules::TRIGGERS, $rule['trigger_action'])
+            .View::field('Sorrend (kisebb = előbb)', 'priority', $rule['priority'], 'number').'</div>'
+            .View::field('Feltételek (JSON-lista; mind teljesüljön)', 'conditions', $pretty((string) $rule['conditions']), 'textarea',
+                ['rows' => 5, 'class' => 'mono', 'placeholder' => '[{"targy": "ujsag"}, {"nincs_jelzo": "olvasta"}]'])
+            .View::field('Hatások (JSON-lista)', 'effects', $pretty((string) $rule['effects']), 'textarea',
+                ['rows' => 5, 'class' => 'mono', 'placeholder' => '[{"jelzo": "olvasta"}, {"tulajdonsag": ["ehseg", -10]}]'])
+            .View::field('Üzenet a mesélőnek (mit meséljen el, ha a szabály teljesül)', 'message', (string) $rule['message'], 'textarea', ['rows' => 3])
+            .'<label style="display:block;margin:6px 0"><input type="checkbox" name="once" value="1"'.($rule['once'] ? ' checked' : '').'> Egyszeri: egy játék alatt csak egyszer teljesülhet</label>'
+            .'<label style="display:block;margin:6px 0 14px"><input type="checkbox" name="active" value="1"'.($rule['active'] ? ' checked' : '').'> Bekapcsolva</label>'
+            .'<button class="btn">'.($isNew ? 'Szabály létrehozása' : 'Mentés').'</button></form>'
+            .'<div class="card"><p>'.implode('<br>', $ids).'</p>'
+            .'<p class="muted">A feltételek a művelet <b>előtt</b> értékelődnek ki. Ha teljesülnek és van <span class="mono">tiltas</span> hatás, a művelet elmarad; '
+            .'különben a hatások a művelet <b>után</b> érvényesülnek. Példa – a kút vize csak üvegben vihető: '
+            .'kiváltó: <i>felvesz</i>, feltételek: <span class="mono">[{"targy": "viz"}, {"nincs_nala": "ures_uveg"}]</span>, '
+            .'hatás: <span class="mono">[{"tiltas": "Nincs mibe merítened a vizet."}]</span></p></div>'
+            .'<h2>Feltételek</h2>'.$help(Rules::CONDITIONS)
+            .'<h2>Hatások</h2>'.$help(Rules::EFFECTS)
+            .($isNew ? '' : '<h2>Veszélyzóna</h2>'.View::postButton('Szabály törlése', ['a' => 'delete_rule', 'g' => $gid, 'r' => $rule['id']], 'Biztosan törlöd a szabályt?', 'btn danger'));
+
+        $title = $isNew ? 'Új szabály' : $rule['name'];
+        echo View::layout($title, $body, $this->user, $this->takeFlash(),
+            ['Játékok' => '/admin/', $game['title'] => View::url(['p' => 'game', 'g' => $gid]), $title => null]);
+    }
+
+    private function saveRule(string $gid): never
+    {
+        $this->requireGame($gid);
+        $rid = (int) ($_POST['r'] ?? 0);
+        $name = trim((string) ($_POST['name'] ?? ''));
+        $trigger = (string) ($_POST['trigger'] ?? '');
+        if ($name === '' || !isset(Rules::TRIGGERS[$trigger])) {
+            $this->fail('A név és a kiváltó művelet kötelező.');
+        }
+        $conds = trim((string) ($_POST['conditions'] ?? '')) ?: '[]';
+        $effects = trim((string) ($_POST['effects'] ?? '')) ?: '[]';
+        $errors = array_merge(Rules::validate($conds, Rules::CONDITIONS, 'feltételek'), Rules::validate($effects, Rules::EFFECTS, 'hatások'));
+        if ($errors) {
+            $this->fail(implode(' ', $errors));
+        }
+        $norm = fn (string $j) => json_encode(json_decode($j, true), JSON_UNESCAPED_UNICODE);
+        $vals = [$name, $trigger, $norm($conds), $norm($effects), trim((string) ($_POST['message'] ?? '')) ?: null,
+            !empty($_POST['once']) ? 1 : 0, (int) ($_POST['priority'] ?? 100), !empty($_POST['active']) ? 1 : 0];
+
+        if ($rid > 0) {
+            $this->db->prepare('UPDATE rules SET name = ?, trigger_action = ?, conditions = ?, effects = ?, message = ?, once = ?, priority = ?, active = ? WHERE game_id = ? AND id = ?')
+                ->execute([...$vals, $gid, $rid]);
+        } else {
+            $this->db->prepare('INSERT INTO rules (name, trigger_action, conditions, effects, message, once, priority, active, game_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+                ->execute([...$vals, $gid]);
+            $rid = (int) $this->db->lastInsertId();
+        }
+        $this->ok('A szabály mentve.', ['p' => 'rule', 'g' => $gid, 'r' => $rid]);
+    }
+
+    /** A tárgyűrlap jellemzői; a nem ismert (kézzel beírt) kulcsok megmaradnak. */
+    private function itemPropsFromPost(array $props): array
+    {
+        $set = function (string $key, mixed $value) use (&$props): void {
+            if ($value === null || $value === '' || $value === [] || $value === false) {
+                unset($props[$key]);
+            } else {
+                $props[$key] = $value;
+            }
+        };
+        $set('cimkek', self::csv((string) ($_POST['tags'] ?? '')));
+        $set('vizsgalat', trim((string) ($_POST['examine'] ?? '')));
+        $cap = max(0, (int) ($_POST['cap'] ?? 0));
+        $set('tarolo', $cap > 0 ? array_filter(['kapacitas' => $cap, 'befogad' => self::csv((string) ($_POST['accepts'] ?? ''))]) : null);
+        $set('tarolot_igenyel', trim((string) ($_POST['needs'] ?? '')));
+        $set('hely', !empty($_POST['backpack']) ? 'hat' : null);
+        $set('nem_felveheto', !empty($_POST['fixed']));
+        $set('cel', !empty($_POST['goal']));
+        $set('vege_szoveg', trim((string) ($_POST['ending'] ?? '')));
+
+        return $props;
+    }
+
+    /** Vesszővel elválasztott címkék → tisztított lista */
+    private static function csv(string $s): array
+    {
+        $out = [];
+        foreach (explode(',', $s) as $part) {
+            $p = trim(mb_strtolower($part));
+            $p = strtr($p, ['á' => 'a', 'é' => 'e', 'í' => 'i', 'ó' => 'o', 'ö' => 'o', 'ő' => 'o', 'ú' => 'u', 'ü' => 'u', 'ű' => 'u', ' ' => '_']);
+            $p = (string) preg_replace('/[^a-z0-9_]/', '', $p);
+            if ($p !== '' && !in_array($p, $out, true)) {
+                $out[] = $p;
+            }
+        }
+
+        return $out;
+    }
+
+    /** Szabályokban és kijáratokban hivatkozott, de nem létező tárgyak és helyszínek. @return list<string> */
+    private function brokenReferences(string $gid, array $itemIds, array $locIds): array
+    {
+        $itemKeys = ['targy', 'tarolo', 'van_nala', 'nincs_nala', 'van_itt', 'targy_elvesz', 'targy_letrehoz', 'targy_atalakit'];
+        $locKeys = ['helyszin', 'latogatott', 'athelyez'];
+        $check = function (string $json, string $where) use ($itemIds, $locIds, $itemKeys, $locKeys): array {
+            $bad = [];
+            foreach (json_decode($json, true) ?: [] as $entry) {
+                foreach (is_array($entry) ? $entry : [] as $k => $v) {
+                    $vals = match (true) {
+                        $k === 'targy_letrehoz' && is_array($v) => [$v['targy'] ?? ''],
+                        $k === 'targy_atalakit' => (array) $v,
+                        in_array($k, ['van_nala', 'targy_elvesz'], true) && is_array($v) => [$v[0] ?? ''],
+                        default => (array) $v,
+                    };
+                    foreach ($vals as $id) {
+                        if (in_array($k, $itemKeys, true) && is_string($id) && !in_array($id, $itemIds, true)) {
+                            $bad[] = sprintf('%s: nincs ilyen tárgy: „%s”', $where, $id);
+                        }
+                        if (in_array($k, $locKeys, true) && is_string($id) && !in_array($id, $locIds, true)) {
+                            $bad[] = sprintf('%s: nincs ilyen helyszín: „%s”', $where, $id);
+                        }
+                    }
+                }
+            }
+            return $bad;
+        };
+
+        $out = [];
+        $stmt = $this->db->prepare('SELECT name, conditions, effects FROM rules WHERE game_id = ?');
+        $stmt->execute([$gid]);
+        foreach ($stmt->fetchAll() as $r) {
+            array_push($out, ...$check((string) $r['conditions'], 'Szabály („'.View::e($r['name']).'”)'), ...$check((string) $r['effects'], 'Szabály („'.View::e($r['name']).'”)'));
+        }
+        $stmt = $this->db->prepare('SELECT from_location, direction, conditions FROM exits WHERE game_id = ? AND conditions IS NOT NULL');
+        $stmt->execute([$gid]);
+        foreach ($stmt->fetchAll() as $e) {
+            array_push($out, ...$check((string) $e['conditions'], 'Kijárat ('.View::e($e['from_location'].' → '.$e['direction']).')'));
+        }
+
+        return array_values(array_unique($out));
     }
 
     private function validId(string $id, string $what): void

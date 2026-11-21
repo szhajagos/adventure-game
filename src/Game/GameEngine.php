@@ -10,14 +10,22 @@ use RuntimeException;
 /**
  * A játékmotor: itt dől el, mi történik ténylegesen.
  * Az AI csak meghívja ezeket a műveleteket, és elmeséli az eredményt –
- * a játék állapotát (pénz, helyszín, éhség…) kizárólag ez az osztály módosítja.
+ * a játék állapotát (pénz, helyszín, éhség, tárgyak…) kizárólag ez az osztály módosítja.
  *
  * Egy szerveren több játék (világ) futhat. Minden játékosnak játékonként
- * külön mentése van, és mindig az „aktuális” játékában lép.
+ * külön mentése van (saját tárgyvilággal), és mindig az „aktuális” játékában lép.
  */
 final class GameEngine
 {
     private const IMAGE_EXTENSIONS = ['webp', 'jpg', 'jpeg', 'png'];
+
+    /** A játék vége után is használható műveletek */
+    private const AFTER_END = ['look', 'status', 'checkpoint'];
+
+    public const DAY_PARTS = ['hajnal' => 'hajnal', 'nappal' => 'nappal', 'este' => 'este', 'ejszaka' => 'éjszaka'];
+
+    /** Egyes műveletek időigénye percben */
+    private const MINUTES = ['felvesz' => 1, 'letesz' => 1, 'belerak' => 1, 'kivesz' => 1, 'megvizsgal' => 2, 'fogyaszt' => 5];
 
     /** @var array<string, list<array>> */
     private array $statDefCache = [];
@@ -37,15 +45,13 @@ final class GameEngine
     //  Játékválasztás
     // =====================================================================
 
-    /**
-     * Az elérhető játékok listája, a játékos saját állásával.
-     */
+    /** Az elérhető játékok listája, a játékos saját állásával. */
     public function listGames(int $playerId): array
     {
         $player = $this->player($playerId);
 
         $stmt = $this->db->prepare(
-            'SELECT g.id, g.title, g.description, s.location_id, s.game_minute, s.updated_at, l.name AS location_name
+            'SELECT g.id, g.title, g.description, s.location_id, s.game_minute, s.updated_at, s.state, l.name AS location_name
              FROM games g
              LEFT JOIN saves s ON s.game_id = g.id AND s.player_id = ?
              LEFT JOIN locations l ON l.game_id = s.game_id AND l.id = s.location_id
@@ -54,17 +60,21 @@ final class GameEngine
         );
         $stmt->execute([$playerId]);
 
-        $games = array_map(fn (array $g) => [
-            'id'         => $g['id'],
-            'cim'        => $g['title'],
-            'leiras'     => $g['description'],
-            'aktualis'   => $g['id'] === $player['current_game_id'],
-            'sajat_allas' => $g['location_id'] === null ? null : [
-                'helyszin'  => $g['location_name'],
-                'ido'       => self::formatTime((int) $g['game_minute']),
-                'utoljara'  => $g['updated_at'],
-            ],
-        ], $stmt->fetchAll());
+        $games = array_map(function (array $g) use ($player) {
+            $end = $g['state'] ? (json_decode((string) $g['state'], true)['vege'] ?? null) : null;
+            return [
+                'id'          => $g['id'],
+                'cim'         => $g['title'],
+                'leiras'      => $g['description'],
+                'aktualis'    => $g['id'] === $player['current_game_id'],
+                'sajat_allas' => $g['location_id'] === null ? null : [
+                    'helyszin' => $g['location_name'],
+                    'ido'      => self::formatTime((int) $g['game_minute']),
+                    'utoljara' => $g['updated_at'],
+                    'vege'     => $end['tipus'] ?? null,
+                ],
+            ];
+        }, $stmt->fetchAll());
 
         return [
             'siker'   => true,
@@ -73,9 +83,7 @@ final class GameEngine
         ];
     }
 
-    /**
-     * Játék kiválasztása: ha már van állása, ott folytatja, ha nincs, új mentés indul.
-     */
+    /** Játék kiválasztása: ha már van állása, ott folytatja, ha nincs, új mentés indul. */
     public function startGame(int $playerId, string $query): array
     {
         $this->player($playerId);
@@ -96,21 +104,19 @@ final class GameEngine
         if ($isNew) {
             $this->createSave($playerId, $game);
         }
-
         $this->db->prepare('UPDATE players SET current_game_id = ? WHERE id = ?')->execute([$game['id'], $playerId]);
-        $save = $this->save($playerId, $game['id']);
 
-        return [
-            'siker'          => true,
-            'esemeny'        => $isNew
+        $ctx = $this->context($playerId, $game);
+        $result = [
+            'siker'    => true,
+            'esemeny'  => $isNew
                 ? 'Új játék kezdődött. Meséld el a bevezetőt, majd a helyszínt.'
                 : 'A játékos folytatja a korábbi állását ebben a játékban.',
-            'jatek'          => $this->gameInfo($game),
-            'bevezeto'       => $isNew ? $game['intro'] : null,
-            'helyszin'       => $this->describeLocation($game['id'], $save['location_id']),
-            'ido'            => self::formatTime((int) $save['game_minute']),
-            'panel'          => $this->panel($playerId, $game),
+            'jatek'    => $this->gameInfo($game),
+            'bevezeto' => $isNew ? $game['intro'] : null,
         ];
+
+        return $this->finish($ctx, $result);
     }
 
     // =====================================================================
@@ -119,95 +125,423 @@ final class GameEngine
 
     public function look(int $playerId): array
     {
-        [$game, $save] = $this->current($playerId);
-        if ($game === null) {
-            return $this->noGameSelected($playerId);
-        }
-
-        return [
-            'siker'    => true,
-            'jatek'    => $this->gameInfo($game),
-            'helyszin' => $this->describeLocation($game['id'], $save['location_id']),
-            'ido'      => self::formatTime((int) $save['game_minute']),
-            'panel'    => $this->panel($playerId, $game),
-        ];
-    }
-
-    public function move(int $playerId, string $direction): array
-    {
-        [$game, $save] = $this->current($playerId);
-        if ($game === null) {
-            return $this->noGameSelected($playerId);
-        }
-
-        $dir = Direction::normalize($direction);
-        $stmt = $this->db->prepare('SELECT * FROM exits WHERE game_id = ? AND from_location = ? AND direction = ?');
-        $stmt->execute([$game['id'], $save['location_id'], $dir]);
-        $exit = $stmt->fetch();
-
-        if (!$exit) {
-            return [
-                'siker'              => false,
-                'esemeny'            => sprintf('Arra (%s) nem lehet menni innen.', $direction),
-                'lehetseges_iranyok' => $this->exitDirections($game['id'], $save['location_id']),
-            ];
-        }
-
-        $minutes = (int) $exit['minutes'];
-        $time    = (int) $save['game_minute'] + $minutes;
-        $state   = $this->state($save, $game['id']);
-        $firstVisit = !$state->visited($exit['to_location']);
-        $changes = $state->passTime($minutes);
-        $state->visit($exit['to_location']);
-
-        $this->db->prepare(
-            'UPDATE saves SET location_id = ?, game_minute = ?, state = ? WHERE player_id = ? AND game_id = ?'
-        )->execute([$exit['to_location'], $time, $state->toJson(), $playerId, $game['id']]);
-
-        return [
-            'siker'      => true,
-            'esemeny'    => sprintf('A játékos %s irányba indult (%s), az út %d percig tartott.',
-                Direction::label($dir), $exit['description'] ?? 'tovább', $minutes),
-            'elso_latogatas' => $firstVisit,
-            'valtozasok' => $this->describeChanges($game['id'], $changes),
-            'helyszin'   => $this->describeLocation($game['id'], $exit['to_location']),
-            'ido'        => self::formatTime($time),
-            'panel'      => $this->panel($playerId, $game),
-        ];
+        return $this->run($playerId, 'look', fn (Context $ctx) => [
+            'siker' => true,
+            'jatek' => $this->gameInfo($ctx->game),
+        ]);
     }
 
     public function status(int $playerId): array
     {
+        return $this->run($playerId, 'status', fn (Context $ctx) => [
+            'siker'         => true,
+            'jatek'         => $ctx->game['title'],
+            'tulajdonsagok' => $ctx->state->statsView(),
+            'leltar'        => $ctx->world->inventoryTree(),
+            'kapacitas'     => $this->capacityView($ctx),
+        ], withLocation: false);
+    }
+
+    public function move(int $playerId, string $direction): array
+    {
+        return $this->run($playerId, 'menj', function (Context $ctx) use ($direction) {
+            $dir = Direction::normalize($direction);
+            $stmt = $this->db->prepare('SELECT * FROM exits WHERE game_id = ? AND from_location = ? AND direction = ?');
+            $stmt->execute([$ctx->gameId(), $ctx->location, $dir]);
+            $exit = $stmt->fetch();
+
+            if (!$exit) {
+                return [
+                    'siker'              => false,
+                    'esemeny'            => sprintf('Arra (%s) nem lehet menni innen.', $direction),
+                    'lehetseges_iranyok' => $this->exitDirections($ctx->gameId(), $ctx->location),
+                ];
+            }
+
+            $event = ['muvelet' => 'menj', 'irany' => $dir];
+            $target = $this->locationRow($ctx->gameId(), $exit['to_location']);
+            if (!$ctx->isOpen($target['open_hours'] ?? null)) {
+                return ['siker' => false, 'esemeny' => sprintf('Zárva: %s (nyitvatartás: %s).', $target['name'], $target['open_hours'])];
+            }
+            $conds = $exit['conditions'] ? (json_decode((string) $exit['conditions'], true) ?: []) : [];
+            if ($conds && !Rules::check($conds, $ctx, $event)) {
+                return ['siker' => false, 'esemeny' => $exit['blocked_message'] ?: 'Arra most nem tudsz továbbmenni.'];
+            }
+
+            $rules = $this->rules($ctx);
+            return $rules->around($ctx, $event, function () use ($ctx, $exit, $dir, $rules) {
+                $minutes = (int) $exit['minutes'];
+                $firstVisit = !$ctx->state->visited($exit['to_location']);
+                $ctx->passTime($minutes);
+                $ctx->location = $exit['to_location'];
+                $ctx->state->visit($exit['to_location']);
+                $rules->after($ctx, ['muvelet' => 'megerkezik']);
+
+                return [
+                    'siker'          => true,
+                    'esemeny'        => sprintf('A játékos %s irányba indult (%s), az út %d percig tartott.',
+                        Direction::label($dir), $exit['description'] ?? 'tovább', $minutes),
+                    'elso_latogatas' => $firstVisit,
+                ];
+            });
+        });
+    }
+
+    /** Tárgy felvétele a helyszínről (a földről vagy egy itt lévő tárolóból). */
+    public function take(int $playerId, string $item, ?int $quantity = null, ?string $where = null): array
+    {
+        return $this->run($playerId, 'felvesz', function (Context $ctx) use ($item, $quantity, $where) {
+            $w = $ctx->world;
+            [$inst, $alts] = $w->findByName($item, $w->atLocationDeep($ctx->location));
+            if ($inst === null) {
+                return $this->notFound($item, $alts, 'itt');
+            }
+            $props = $w->props($inst['item_id']);
+            if (!empty($props['nem_felveheto'])) {
+                return ['siker' => false, 'esemeny' => sprintf('A(z) %s nem vehető fel.', $w->name($inst))];
+            }
+            $qty = max(1, min($quantity ?? (int) $inst['quantity'], (int) $inst['quantity']));
+
+            return $this->rules($ctx)->around($ctx, $this->event('felvesz', $inst), function () use ($ctx, $inst, $qty, $where) {
+                $w = $ctx->world;
+                if ($where !== null && trim($where) !== '') {
+                    [$type, $place, $err] = $this->resolvePlace($ctx, $where);
+                    $err ??= $w->fits($inst, $qty, $type, $place);
+                } else {
+                    [$type, $place, $err] = $w->autoPlace($inst, $qty);
+                }
+                if ($err !== null) {
+                    return ['siker' => false, 'esemeny' => $err];
+                }
+                $from = $inst['place_type'] === 'container' ? ' ('.$w->whereLabel($inst).')' : '';
+                $id = $w->move($inst, $qty, $type, $place);
+                $ctx->passTime(self::MINUTES['felvesz']);
+
+                return [
+                    'siker'   => true,
+                    'esemeny' => sprintf('A játékos felvette: %s%s%s → %s.', $w->name($inst), $qty > 1 ? " ({$qty} db)" : '', $from, $w->whereLabel($w->get($id))),
+                ];
+            });
+        });
+    }
+
+    /** Tárgy letétele a helyszínen. */
+    public function drop(int $playerId, string $item, ?int $quantity = null): array
+    {
+        return $this->run($playerId, 'letesz', function (Context $ctx) use ($item, $quantity) {
+            $w = $ctx->world;
+            [$inst, $alts] = $w->findByName($item, $w->carried());
+            if ($inst === null) {
+                return $this->notFound($item, $alts, 'nala');
+            }
+            $qty = max(1, min($quantity ?? (int) $inst['quantity'], (int) $inst['quantity']));
+
+            return $this->rules($ctx)->around($ctx, $this->event('letesz', $inst), function () use ($ctx, $inst, $qty) {
+                $ctx->world->move($inst, $qty, 'location', $ctx->location);
+                $ctx->passTime(self::MINUTES['letesz']);
+
+                return ['siker' => true, 'esemeny' => sprintf('A játékos letette: %s%s.', $ctx->world->name($inst), $qty > 1 ? " ({$qty} db)" : '')];
+            });
+        });
+    }
+
+    /** Tárgy berakása egy tárolóba (ami a játékosnál vagy a helyszínen van). */
+    public function putIn(int $playerId, string $item, string $container, ?int $quantity = null): array
+    {
+        return $this->run($playerId, 'belerak', function (Context $ctx) use ($item, $container, $quantity) {
+            $w = $ctx->world;
+            $reach = array_merge($w->carried(), $w->atLocationDeep($ctx->location));
+            [$box, $alts] = $w->findByName($container, array_filter($reach, fn ($i) => isset($w->props($i['item_id'])['tarolo'])));
+            if ($box === null) {
+                return $this->notFound($container, $alts, 'tarolo');
+            }
+            [$inst, $alts] = $w->findByName($item, array_filter($reach, fn ($i) => (int) $i['id'] !== (int) $box['id']));
+            if ($inst === null) {
+                return $this->notFound($item, $alts, 'elerheto');
+            }
+            $qty = max(1, min($quantity ?? (int) $inst['quantity'], (int) $inst['quantity']));
+            $event = $this->event('belerak', $inst) + ['tarolo' => $box['item_id']];
+
+            return $this->rules($ctx)->around($ctx, $event, function () use ($ctx, $inst, $box, $qty) {
+                $w = $ctx->world;
+                if (($err = $w->fits($inst, $qty, 'container', (string) $box['id'])) !== null) {
+                    return ['siker' => false, 'esemeny' => $err];
+                }
+                $w->move($inst, $qty, 'container', (string) $box['id']);
+                $ctx->passTime(self::MINUTES['belerak']);
+
+                return ['siker' => true, 'esemeny' => sprintf('A játékos belerakta: %s → %s.', $w->name($inst), $w->name($box))];
+            });
+        });
+    }
+
+    /** Tárgy kivétele egy tárolóból: a játékoshoz kerül. */
+    public function takeOut(int $playerId, string $item, string $container, ?int $quantity = null): array
+    {
+        return $this->run($playerId, 'kivesz', function (Context $ctx) use ($item, $container, $quantity) {
+            $w = $ctx->world;
+            $reach = array_merge($w->carried(), $w->atLocationDeep($ctx->location));
+            [$box, $alts] = $w->findByName($container, array_filter($reach, fn ($i) => isset($w->props($i['item_id'])['tarolo'])));
+            if ($box === null) {
+                return $this->notFound($container, $alts, 'tarolo');
+            }
+            [$inst, $alts] = $w->findByName($item, $w->at('container', (string) $box['id']));
+            if ($inst === null) {
+                return $this->notFound($item, $alts, 'tarolo_tartalma');
+            }
+            $qty = max(1, min($quantity ?? (int) $inst['quantity'], (int) $inst['quantity']));
+            $event = $this->event('kivesz', $inst) + ['tarolo' => $box['item_id']];
+
+            return $this->rules($ctx)->around($ctx, $event, function () use ($ctx, $inst, $box, $qty) {
+                $w = $ctx->world;
+                [$type, $place, $err] = $w->autoPlace($inst, $qty);
+                // ha a kivett tárgy ugyanabba a tárolóba kerülne vissza, a kéz a jobb
+                if ($err === null && $type === 'container' && $place === (string) $box['id']) {
+                    $type = null;
+                    foreach (['jobb_kez', 'bal_kez', 'zseb'] as $slot) {
+                        if ($w->fits($inst, $qty, 'slot', $slot) === null) {
+                            [$type, $place] = ['slot', $slot];
+                            break;
+                        }
+                    }
+                    $err = $type === null ? 'Nincs szabad kezed, és a zsebedben sincs hely.' : null;
+                }
+                if ($err !== null) {
+                    return ['siker' => false, 'esemeny' => $err];
+                }
+                $id = $w->move($inst, $qty, $type, $place);
+                $ctx->passTime(self::MINUTES['kivesz']);
+
+                return ['siker' => true, 'esemeny' => sprintf('A játékos kivette: %s (%s) → %s.', $w->name($inst), $w->name($box), $w->whereLabel($w->get($id)))];
+            });
+        });
+    }
+
+    /** Tárgy alapos megvizsgálása (a játékosnál vagy a helyszínen). */
+    public function examine(int $playerId, string $item): array
+    {
+        return $this->run($playerId, 'megvizsgal', function (Context $ctx) use ($item) {
+            $w = $ctx->world;
+            [$inst, $alts] = $w->findByName($item, array_merge($w->carried(), $w->atLocationDeep($ctx->location)));
+            if ($inst === null) {
+                return $this->notFound($item, $alts, 'elerheto');
+            }
+
+            return $this->rules($ctx)->around($ctx, $this->event('megvizsgal', $inst), function () use ($ctx, $inst) {
+                $w = $ctx->world;
+                $type = $w->type($inst['item_id']);
+                $props = $w->props($inst['item_id']);
+                $ctx->passTime(self::MINUTES['megvizsgal']);
+                $out = [
+                    'siker'   => true,
+                    'esemeny' => sprintf('A játékos megvizsgálta: %s.', $w->name($inst)),
+                    'targy'   => array_filter([
+                        'nev'       => $type['name'],
+                        'leiras'    => $type['description'],
+                        'reszletek' => $props['vizsgalat'] ?? null,
+                        'darab'     => (int) $inst['quantity'],
+                        'hol'       => $w->whereLabel($inst),
+                        'meret'     => (int) $type['size'],
+                        'cimkek'    => $props['cimkek'] ?? null,
+                    ], fn ($v) => $v !== null && $v !== []),
+                ];
+                if (isset($props['tarolo'])) {
+                    $out['targy']['tartalom'] = array_map(fn ($c) => ['nev' => $w->name($c), 'darab' => (int) $c['quantity']], $w->at('container', (string) $inst['id']));
+                    $out['targy']['kapacitas'] = (int) ($props['tarolo']['kapacitas'] ?? 0);
+                }
+
+                return $out;
+            });
+        });
+    }
+
+    /** Étel vagy ital elfogyasztása. */
+    public function consume(int $playerId, string $item): array
+    {
+        return $this->run($playerId, 'fogyaszt', function (Context $ctx) use ($item) {
+            $w = $ctx->world;
+            [$inst, $alts] = $w->findByName($item, array_merge($w->carried(), $w->atLocationDeep($ctx->location)));
+            if ($inst === null) {
+                return $this->notFound($item, $alts, 'elerheto');
+            }
+            $type = $w->type($inst['item_id']);
+            $tags = $w->tags($inst['item_id']);
+            if ((int) $type['nutrition'] <= 0 && !array_intersect(['etel', 'ital'], $tags)) {
+                return ['siker' => false, 'esemeny' => sprintf('A(z) %s nem ehető és nem iható.', $type['name'])];
+            }
+
+            $eat = $ctx->settings['etkezes'] ?? ['tulajdonsag' => 'jollakottsag', 'irany' => 1];
+            $stat = (string) ($eat['tulajdonsag'] ?? '');
+            if ((int) $type['nutrition'] > 0 && $stat !== '' && $ctx->state->hasStat($stat)) {
+                $limit = (int) ($eat['irany'] ?? 1) >= 0 ? $ctx->state->maxOf($stat) : $ctx->state->minOf($stat);
+                if ($limit !== null && abs($ctx->state->stat($stat) - $limit) < 1) {
+                    return ['siker' => false, 'esemeny' => 'A játékos teljesen jóllakott, most egy falatot sem bír többet.'];
+                }
+            }
+
+            return $this->rules($ctx)->around($ctx, $this->event('fogyaszt', $inst), function () use ($ctx, $inst, $type) {
+                $eat = $ctx->settings['etkezes'] ?? ['tulajdonsag' => 'jollakottsag', 'irany' => 1];
+                $stat = (string) ($eat['tulajdonsag'] ?? '');
+                if ($stat !== '' && $ctx->state->hasStat($stat)) {
+                    $ctx->addStat($stat, (int) $type['nutrition'] * ((int) ($eat['irany'] ?? -1) >= 0 ? 1 : -1));
+                }
+                $ctx->world->decrease($inst, 1);
+                $ctx->passTime(self::MINUTES['fogyaszt']);
+
+                return ['siker' => true, 'esemeny' => sprintf('A játékos elfogyasztotta: %s.', $type['name'])];
+            });
+        });
+    }
+
+    // =====================================================================
+    //  A test: alvás, pihenés, tisztálkodás, várakozás
+    // =====================================================================
+
+    /** A test beállításai (melyik tulajdonság az energia, a higiénia; mennyit ad az alvás…) */
+    private function body(Context $ctx): array
+    {
+        return ($ctx->settings['test'] ?? []) + [
+            'energia'          => 'energia',
+            'higienia'         => 'higienia',
+            'alvas_orankent'   => 12,
+            'alvas_agy_nelkul' => 0.5,
+            'pihenes'          => 15,
+            'pihenes_naponta'  => 1,
+        ];
+    }
+
+    /** Alvás: óránként nő az energia (ágyban teljesen, máshol csak részben), amíg ki nem pihenti magát. */
+    public function sleep(int $playerId, ?int $hours = null): array
+    {
+        return $this->run($playerId, 'alszik', function (Context $ctx) use ($hours) {
+            $b = $this->body($ctx);
+            $stat = (string) $b['energia'];
+            $hasStat = $stat !== '' && $ctx->state->hasStat($stat);
+            $max = $hasStat ? ($ctx->state->maxOf($stat) ?? 100) : null;
+            if ($hasStat && $ctx->state->stat($stat) >= $max * 0.9) {
+                return ['siker' => false, 'esemeny' => 'A játékos nem álmos, most nem tudna elaludni.'];
+            }
+            $hours = max(1, min(12, $hours ?? 8));
+            $inBed = in_array('agy', $ctx->features(), true);
+            $rate = (float) $b['alvas_orankent'] * ($inBed ? 1 : (float) $b['alvas_agy_nelkul']);
+
+            return $this->rules($ctx)->around($ctx, ['muvelet' => 'alszik'], function () use ($ctx, $hours, $hasStat, $stat, $max, $rate, $inBed) {
+                $slept = 0;
+                for ($i = 0; $i < $hours && $ctx->state->end() === null; $i++) {
+                    $ctx->passTime(60);
+                    if ($hasStat) {
+                        $ctx->addStat($stat, $rate - $ctx->state->perHour($stat)); // az óránkénti fogyás alvás közben nincs
+                    }
+                    $slept++;
+                    if ($hasStat && $ctx->state->stat($stat) >= $max) {
+                        break;
+                    }
+                }
+
+                return [
+                    'siker'   => true,
+                    'esemeny' => sprintf('A játékos %d órát aludt%s.%s', $slept,
+                        $inBed ? ' ágyban' : ' (nem ágyban, ezért kevésbé pihentetően)',
+                        $hasStat && $ctx->state->stat($stat) >= $max ? ' Teljesen kipihente magát.' : ''),
+                ];
+            });
+        });
+    }
+
+    /** Rövid pihenés: egy kis energia, naponta korlátozott alkalommal. */
+    public function rest(int $playerId): array
+    {
+        return $this->run($playerId, 'pihen', function (Context $ctx) {
+            $b = $this->body($ctx);
+            if ($ctx->state->counter('napi_pihenes') >= (int) $b['pihenes_naponta']) {
+                return ['siker' => false, 'esemeny' => 'Ma már pihent a játékos; egy újabb rövid pihenő nem segítene, csak az alvás.'];
+            }
+
+            return $this->rules($ctx)->around($ctx, ['muvelet' => 'pihen'], function () use ($ctx, $b) {
+                $ctx->passTime(30);
+                $stat = (string) $b['energia'];
+                if ($stat !== '' && $ctx->state->hasStat($stat)) {
+                    $ctx->addStat($stat, (float) $b['pihenes']);
+                }
+                $ctx->state->increment('napi_pihenes');
+
+                return ['siker' => true, 'esemeny' => 'A játékos fél órát pihent.'];
+            });
+        });
+    }
+
+    /** Tisztálkodás: mosdóban vagy fürdőben a higiénia a maximumra áll. */
+    public function wash(int $playerId): array
+    {
+        return $this->run($playerId, 'tisztalkodik', function (Context $ctx) {
+            $features = $ctx->features();
+            $bath = in_array('furdo', $features, true);
+            if (!$bath && !in_array('mosdo', $features, true)) {
+                return ['siker' => false, 'esemeny' => 'Itt nincs hol megmosakodni (mosdó vagy fürdő kellene).'];
+            }
+
+            return $this->rules($ctx)->around($ctx, ['muvelet' => 'tisztalkodik'], function () use ($ctx, $bath) {
+                $ctx->passTime($bath ? 30 : 15);
+                $stat = (string) $this->body($ctx)['higienia'];
+                if ($stat !== '' && $ctx->state->hasStat($stat)) {
+                    $ctx->setStat($stat, $ctx->state->maxOf($stat) ?? 100);
+                }
+
+                return ['siker' => true, 'esemeny' => $bath ? 'A játékos megfürdött.' : 'A játékos megmosakodott.'];
+            });
+        });
+    }
+
+    /** Várakozás: telik az idő (legfeljebb 12 óra). */
+    public function wait(int $playerId, int $minutes): array
+    {
+        return $this->run($playerId, 'var', function (Context $ctx) use ($minutes) {
+            $minutes = max(5, min(720, $minutes));
+
+            return $this->rules($ctx)->around($ctx, ['muvelet' => 'var'], function () use ($ctx, $minutes) {
+                $ctx->passTime($minutes);
+
+                return ['siker' => true, 'esemeny' => sprintf('A játékos várt %s.', $minutes >= 60
+                    ? sprintf('%d órát%s', intdiv($minutes, 60), $minutes % 60 ? sprintf(' és %d percet', $minutes % 60) : '')
+                    : $minutes.' percet')];
+            });
+        });
+    }
+
+    /** Visszatérés a legutóbbi ellenőrző ponthoz (vereség után). */
+    public function restoreCheckpoint(int $playerId): array
+    {
         [$game, $save] = $this->current($playerId);
         if ($game === null) {
             return $this->noGameSelected($playerId);
         }
-
-        $stmt = $this->db->prepare(
-            'SELECT i.name, si.quantity FROM save_items si
-             JOIN items i ON i.game_id = si.game_id AND i.id = si.item_id
-             WHERE si.player_id = ? AND si.game_id = ? ORDER BY i.name'
-        );
+        $state = $this->state($save, $game['id']);
+        if (($state->end()['tipus'] ?? null) === 'gyozelem') {
+            return ['siker' => false, 'esemeny' => 'Ezt a játékot már megnyerte a játékos. Új kalandot az uj_jatek eszközzel kezdhet.'];
+        }
+        $stmt = $this->db->prepare('SELECT * FROM save_checkpoints WHERE player_id = ? AND game_id = ? ORDER BY id DESC LIMIT 1');
         $stmt->execute([$playerId, $game['id']]);
-        $inventory = array_map(
-            fn (array $r) => ['nev' => $r['name'], 'darab' => (int) $r['quantity']],
-            $stmt->fetchAll()
-        );
+        $cp = $stmt->fetch();
+        if (!$cp) {
+            return ['siker' => false, 'esemeny' => 'Nincs ellenőrző pont. Az uj_jatek eszközzel elölről kezdhető a játék.'];
+        }
 
-        return [
-            'siker'     => true,
-            'jatek'     => $game['title'],
-            'helyszin'  => $this->locationName($game['id'], $save['location_id']),
-            'ido'       => self::formatTime((int) $save['game_minute']),
-            'tulajdonsagok' => $this->state($save, $game['id'])->statsView(),
-            'leltar'    => $inventory,
-            'panel'     => $this->panel($playerId, $game),
-        ];
+        $this->db->beginTransaction();
+        $this->db->prepare('UPDATE saves SET location_id = ?, game_minute = ?, state = ? WHERE player_id = ? AND game_id = ?')
+            ->execute([$cp['location_id'], $cp['game_minute'], $cp['state'], $playerId, $game['id']]);
+        $world = new World($this->db, $playerId, $game['id'], $this->settings($game));
+        $world->restore(json_decode((string) $cp['instances'], true) ?: []);
+        $this->db->commit();
+
+        $ctx = $this->context($playerId, $game);
+
+        return $this->finish($ctx, [
+            'siker'   => true,
+            'esemeny' => sprintf('A játékos visszatért a(z) „%s” ellenőrző ponthoz. Meséld el, hogy újra itt van, és folytathatja.', $cp['name']),
+        ]);
     }
 
-    /**
-     * Az aktuális játék újrakezdése: a mentés visszaáll a játék kezdőállapotára.
-     */
+    /** Az aktuális játék újrakezdése: a mentés visszaáll a játék kezdőállapotára. */
     public function restart(int $playerId): array
     {
         [$game] = $this->current($playerId);
@@ -217,15 +551,217 @@ final class GameEngine
 
         $this->db->prepare('DELETE FROM saves WHERE player_id = ? AND game_id = ?')->execute([$playerId, $game['id']]);
         $this->createSave($playerId, $game);
+        $ctx = $this->context($playerId, $game);
 
-        return [
+        return $this->finish($ctx, [
             'siker'    => true,
             'esemeny'  => 'A játék elölről kezdődött. Meséld el a bevezetőt, majd a helyszínt.',
             'jatek'    => $this->gameInfo($game),
             'bevezeto' => $game['intro'],
-            'helyszin' => $this->describeLocation($game['id'], $game['start_location']),
-            'ido'      => self::formatTime((int) $game['start_minute']),
-            'panel'    => $this->panel($playerId, $game),
+        ]);
+    }
+
+    // =====================================================================
+    //  A műveletek közös kerete
+    // =====================================================================
+
+    /** @param callable(Context): array $body */
+    private function run(int $playerId, string $action, callable $body, bool $withLocation = true): array
+    {
+        [$game, $save] = $this->current($playerId);
+        if ($game === null) {
+            return $this->noGameSelected($playerId);
+        }
+        $ctx = $this->context($playerId, $game);
+
+        if ($ctx->state->end() !== null && !in_array($action, self::AFTER_END, true)) {
+            return $this->finish($ctx, [
+                'siker'   => false,
+                'esemeny' => 'A játék véget ért, ez a művelet már nem lehetséges.',
+            ], $withLocation);
+        }
+
+        $before = $ctx->location;
+        $result = $body($ctx);
+        $result['siker'] ??= false;
+        if ($ctx->blocked !== null && !$result['siker']) {
+            $result['esemeny'] = $ctx->blocked;
+        }
+
+        return $this->finish($ctx, $result, $withLocation || $ctx->location !== $before);
+    }
+
+    /** Mentés, a játék végének ellenőrzése, és a válasz összeállítása. */
+    private function finish(Context $ctx, array $result, bool $withLocation = true): array
+    {
+        $wasEnded = $ctx->state->end() !== null;
+        if (!$wasEnded) {
+            $this->checkEnd($ctx);
+        }
+        $this->persist($ctx);
+
+        // vereség pillanatában nem készül ellenőrző pont (különben onnan is azonnal vesztene)
+        foreach (($ctx->state->end()['tipus'] ?? null) === 'vereseg' ? [] : $ctx->checkpoints as $name) {
+            $this->createCheckpoint($ctx, $name);
+            $ctx->messages[] = sprintf('Ellenőrző pont: „%s”. Ha a játékos később elbukik, innen folytathatja.', $name);
+        }
+
+        if ($ctx->messages) {
+            $result['esemenyek'] = array_values(array_unique($ctx->messages));
+        }
+        if ($ctx->changes) {
+            $result['valtozasok'] = $this->describeChanges($ctx->gameId(), $ctx->changes);
+        }
+        if ($withLocation) {
+            $result['helyszin'] = $this->describeLocation($ctx, $ctx->location);
+        }
+        $result['ido'] = self::formatTime($ctx->minute);
+        $result['napszak'] = self::DAY_PARTS[$ctx->dayPart()];
+
+        if (($end = $ctx->state->end()) !== null) {
+            $result['vege'] = $end + [
+                'teendo' => $end['tipus'] === 'gyozelem'
+                    ? ($wasEnded ? 'A játékos már megnyerte ezt a játékot.' : 'A játékos GYŐZÖTT! Meséld el ünnepélyesen a befejezést a szöveg alapján.')
+                      .' Új kalandot az uj_jatek vagy a jatekok eszközzel kezdhet.'
+                    : ($wasEnded ? 'A játék véget ért (vereség).' : 'A játékos ELBUKOTT. Meséld el a szöveg alapján, együttérzően.')
+                      .' Felajánlhatod a visszatérést az utolsó ellenőrző ponthoz (vissza_ellenorzo_ponthoz), vagy az újrakezdést (uj_jatek).',
+            ];
+        }
+        $result['panel'] = $this->panel($ctx);
+
+        return $result;
+    }
+
+    private function checkEnd(Context $ctx): void
+    {
+        // Győzelem: egy céltárgy a játékosnál van
+        foreach ($ctx->world->carried() as $inst) {
+            $props = $ctx->world->props($inst['item_id']);
+            if (!empty($props['cel'])) {
+                $ctx->state->setEnd([
+                    'tipus'  => 'gyozelem',
+                    'szoveg' => (string) ($props['vege_szoveg'] ?? $ctx->settings['gyozelem_szoveg'] ?? 'Elérted a célodat.'),
+                    'cel'    => $ctx->world->name($inst),
+                ]);
+                return;
+            }
+        }
+        // Vereség: a beállításokban megadott feltételek
+        foreach ((array) ($ctx->settings['vereseg'] ?? []) as $def) {
+            if (is_array($def) && !empty($def['feltetelek']) && Rules::check((array) $def['feltetelek'], $ctx)) {
+                $ctx->state->setEnd(['tipus' => 'vereseg', 'szoveg' => (string) ($def['szoveg'] ?? 'Véget ért a kaland.')]);
+                return;
+            }
+        }
+    }
+
+    private function persist(Context $ctx): void
+    {
+        $this->db->prepare('UPDATE saves SET location_id = ?, game_minute = ?, state = ? WHERE player_id = ? AND game_id = ?')
+            ->execute([$ctx->location, $ctx->minute, $ctx->state->toJson(), $ctx->playerId, $ctx->gameId()]);
+    }
+
+    private function createCheckpoint(Context $ctx, string $name): void
+    {
+        $this->db->prepare(
+            'INSERT INTO save_checkpoints (player_id, game_id, name, location_id, game_minute, state, instances) VALUES (?, ?, ?, ?, ?, ?, ?)'
+        )->execute([
+            $ctx->playerId, $ctx->gameId(), $name, $ctx->location, $ctx->minute, $ctx->state->toJson(),
+            json_encode($ctx->world->snapshot(), JSON_UNESCAPED_UNICODE),
+        ]);
+        // csak a legutóbbi néhányat tartjuk meg
+        $this->db->prepare(
+            'DELETE FROM save_checkpoints WHERE player_id = ? AND game_id = ? AND id NOT IN
+             (SELECT id FROM (SELECT id FROM save_checkpoints WHERE player_id = ? AND game_id = ? ORDER BY id DESC LIMIT 5) t)'
+        )->execute([$ctx->playerId, $ctx->gameId(), $ctx->playerId, $ctx->gameId()]);
+    }
+
+    private function context(int $playerId, array $game): Context
+    {
+        $save = $this->save($playerId, $game['id']);
+        $settings = $this->settings($game);
+        $state = $this->state($save, $game['id']);
+        $world = new World($this->db, $playerId, $game['id'], $settings);
+
+        // Régi mentés (az 1. réteg előttről): a tárgyvilág most jön létre
+        if (!$state->flag('_vilag')) {
+            $world->initFromTemplate((int) $save['game_minute']);
+            $old = $this->db->prepare('SELECT item_id, quantity FROM save_items WHERE player_id = ? AND game_id = ?');
+            $old->execute([$playerId, $game['id']]);
+            foreach ($old->fetchAll() as $r) {
+                $world->create($r['item_id'], (int) $r['quantity'], 'slot', 'zseb', (int) $save['game_minute']);
+            }
+            $this->db->prepare('DELETE FROM save_items WHERE player_id = ? AND game_id = ?')->execute([$playerId, $game['id']]);
+            $state->setFlag('_vilag', true);
+        }
+
+        $ctx = new Context($playerId, $game, $settings, $state, $world, $save['location_id'], (int) $save['game_minute']);
+        $ctx->rules = new Rules($this->db, $game['id']);
+        $stmt = $this->db->prepare('SELECT id, features FROM locations WHERE game_id = ?');
+        $stmt->execute([$game['id']]);
+        foreach ($stmt->fetchAll() as $l) {
+            $ctx->featureMap[$l['id']] = json_decode((string) $l['features'], true) ?: [];
+        }
+
+        return $ctx;
+    }
+
+    private function rules(Context $ctx): Rules
+    {
+        return $ctx->rules ??= new Rules($this->db, $ctx->gameId());
+    }
+
+    private function event(string $action, array $inst): array
+    {
+        return ['muvelet' => $action, 'targy' => $inst['item_id']];
+    }
+
+    /** A játékos által megnevezett hely („bal kéz”, „zseb”, „szatyor”) */
+    private function resolvePlace(Context $ctx, string $where): array
+    {
+        $q = World::simplify($where);
+        foreach (['bal' => 'bal_kez', 'jobb' => 'jobb_kez', 'zseb' => 'zseb', 'hat' => 'hat'] as $word => $slot) {
+            if (str_contains($q, $word)) {
+                return ['slot', $slot, null];
+            }
+        }
+        if (str_contains($q, 'kez')) {
+            return $ctx->world->at('slot', 'jobb_kez') ? ['slot', 'bal_kez', null] : ['slot', 'jobb_kez', null];
+        }
+        $w = $ctx->world;
+        [$box] = $w->findByName($where, array_filter($w->carried(), fn ($i) => isset($w->props($i['item_id'])['tarolo'])));
+        if ($box !== null) {
+            return ['container', (string) $box['id'], null];
+        }
+
+        return [null, null, sprintf('Nem tudod, hova tennéd: „%s”.', $where)];
+    }
+
+    private function notFound(string $query, array $alternatives, string $scope): array
+    {
+        if (count($alternatives) > 1) {
+            return ['siker' => false, 'esemeny' => sprintf('Több dologra is illik: „%s”. Melyikre gondol a játékos?', $query), 'lehetosegek' => $alternatives];
+        }
+        $where = match ($scope) {
+            'itt'             => 'itt nincs',
+            'nala'            => 'nincs a játékosnál',
+            'tarolo'          => 'nincs ilyen tároló a közelben',
+            'tarolo_tartalma' => 'nincs a tárolóban',
+            default           => 'nincs se a játékosnál, se a közelben',
+        };
+
+        return ['siker' => false, 'esemeny' => sprintf('„%s”: %s.', $query, $where)];
+    }
+
+    private function capacityView(Context $ctx): array
+    {
+        $w = $ctx->world;
+        $used = fn (string $slot) => array_sum(array_map(fn ($i) => $w->size($i) * (int) $i['quantity'], $w->at('slot', $slot)));
+
+        return [
+            'zseb'     => sprintf('%d / %d', $used('zseb'), (int) ($ctx->settings['zseb_kapacitas'] ?? 2)),
+            'bal_kez'  => $w->at('slot', 'bal_kez') ? 'foglalt' : 'szabad',
+            'jobb_kez' => $w->at('slot', 'jobb_kez') ? 'foglalt' : 'szabad',
         ];
     }
 
@@ -277,10 +813,17 @@ final class GameEngine
         return $stmt->fetch() ?: null;
     }
 
+    private function settings(array $game): array
+    {
+        $s = json_decode((string) ($game['settings'] ?? '{}'), true);
+
+        return is_array($s) ? $s : [];
+    }
+
     /** Játék keresése azonosító vagy cím (részlet) alapján, ékezetektől függetlenül. */
     private function findGame(string $query): ?array
     {
-        $q = self::simplify($query);
+        $q = World::simplify($query);
         if ($q === '') {
             return null;
         }
@@ -288,13 +831,13 @@ final class GameEngine
         $games = $this->db->query('SELECT * FROM games WHERE active = 1 ORDER BY sort_order')->fetchAll();
 
         foreach ($games as $g) {
-            if (self::simplify($g['id']) === $q) {
+            if (World::simplify($g['id']) === $q) {
                 return $g;
             }
         }
 
         $matches = array_values(array_filter($games, fn (array $g) =>
-            str_contains(self::simplify($g['title']), $q) || str_contains($q, self::simplify($g['id']))));
+            str_contains(World::simplify($g['title']), $q) || str_contains($q, World::simplify($g['id']))));
 
         return count($matches) === 1 ? $matches[0] : null;
     }
@@ -310,9 +853,19 @@ final class GameEngine
     private function createSave(int $playerId, array $game): void
     {
         $state = State::initial($this->statDefs($game['id']), $game['start_location']);
+        $state->setFlag('_vilag', true);
         $this->db->prepare(
             'INSERT INTO saves (player_id, game_id, location_id, game_minute, state) VALUES (?, ?, ?, ?, ?)'
         )->execute([$playerId, $game['id'], $game['start_location'], $game['start_minute'], $state->toJson()]);
+
+        $world = new World($this->db, $playerId, $game['id'], $this->settings($game));
+        $world->initFromTemplate((int) $game['start_minute']);
+
+        // Az első ellenőrző pont: a kezdet
+        $this->db->prepare(
+            'INSERT INTO save_checkpoints (player_id, game_id, name, location_id, game_minute, state, instances) VALUES (?, ?, ?, ?, ?, ?, ?)'
+        )->execute([$playerId, $game['id'], 'A kezdet', $game['start_location'], $game['start_minute'], $state->toJson(),
+            json_encode($world->snapshot(), JSON_UNESCAPED_UNICODE)]);
     }
 
     /** A játék tulajdonság-definíciói (gyorsítótárazva egy kérésen belül) */
@@ -332,13 +885,15 @@ final class GameEngine
         return new State((string) $save['state'], $this->statDefs($gameId));
     }
 
-    /** @param array<string, array{0:int,1:int}> $changes */
+    /** @param array<string, array{0:float,1:float}> $changes */
     private function describeChanges(string $gameId, array $changes): array
     {
         $labels = array_column($this->statDefs($gameId), 'label', 'id');
         $out = [];
         foreach ($changes as $id => [$from, $to]) {
-            $out[] = ['tulajdonsag' => $labels[$id] ?? $id, 'elotte' => $from, 'utana' => $to];
+            if (round($from) != round($to)) {
+                $out[] = ['tulajdonsag' => $labels[$id] ?? $id, 'elotte' => round($from), 'utana' => round($to)];
+            }
         }
 
         return $out;
@@ -353,51 +908,47 @@ final class GameEngine
         ];
     }
 
-    private function describeLocation(string $gameId, string $locationId): array
+    private function describeLocation(Context $ctx, string $locationId): array
     {
-        $stmt = $this->db->prepare('SELECT * FROM locations WHERE game_id = ? AND id = ?');
-        $stmt->execute([$gameId, $locationId]);
-        $loc = $stmt->fetch();
+        $gameId = $ctx->gameId();
+        $loc = $this->locationRow($gameId, $locationId);
 
         $stmt = $this->db->prepare(
-            'SELECT e.direction, e.description, l.name AS target
+            'SELECT e.direction, e.description, e.conditions, l.name AS target, l.open_hours
              FROM exits e JOIN locations l ON l.game_id = e.game_id AND l.id = e.to_location
              WHERE e.game_id = ? AND e.from_location = ? ORDER BY e.direction'
         );
         $stmt->execute([$gameId, $locationId]);
-        $exits = array_map(fn (array $e) => [
-            'irany'   => $e['direction'],
-            'leiras'  => $e['description'],
-            'celpont' => $e['target'],
-        ], $stmt->fetchAll());
+        $exits = array_map(function (array $e) use ($ctx) {
+            $out = ['irany' => $e['direction'], 'leiras' => $e['description'], 'celpont' => $e['target']];
+            $conds = $e['conditions'] ? (json_decode((string) $e['conditions'], true) ?: []) : [];
+            if (!$ctx->isOpen($e['open_hours'])) {
+                $out['akadaly'] = true;
+                $out['zarva'] = 'nyitva: '.$e['open_hours'];
+            } elseif ($conds && !Rules::check($conds, $ctx, ['muvelet' => 'menj', 'irany' => $e['direction']])) {
+                $out['akadaly'] = true; // látszik, de most nem járható
+            }
+            return $out;
+        }, $stmt->fetchAll());
 
-        $stmt = $this->db->prepare(
-            'SELECT i.name, li.quantity FROM location_items li
-             JOIN items i ON i.game_id = li.game_id AND i.id = li.item_id
-             WHERE li.game_id = ? AND li.location_id = ? AND li.quantity > 0 ORDER BY i.name'
-        );
-        $stmt->execute([$gameId, $locationId]);
-        $items = array_map(
-            fn (array $r) => ['nev' => $r['name'], 'darab' => (int) $r['quantity']],
-            $stmt->fetchAll()
-        );
-
-        return [
-            'id'        => $loc['id'],
-            'nev'       => $loc['name'],
-            'leiras'    => $loc['description'],
-            'kijaratok' => $exits,
-            'targyak'   => $items,
-            'kep'       => $this->imageFor($gameId, $loc),
-        ];
+        return array_filter([
+            'id'            => $loc['id'],
+            'nev'           => $loc['name'],
+            'leiras'        => $loc['description'],
+            'felszereltseg' => json_decode((string) ($loc['features'] ?? '[]'), true) ?: null,
+            'nyitvatartas'  => $loc['open_hours'] ?: null,
+            'kijaratok'     => $exits,
+            'targyak'       => $ctx->world->locationTree($locationId),
+            'kep'           => $this->imageFor($gameId, $loc, $ctx->state, $ctx->minute),
+        ], fn ($v) => $v !== null);
     }
 
-    private function locationName(string $gameId, string $locationId): string
+    private function locationRow(string $gameId, string $locationId): ?array
     {
-        $stmt = $this->db->prepare('SELECT name FROM locations WHERE game_id = ? AND id = ?');
+        $stmt = $this->db->prepare('SELECT * FROM locations WHERE game_id = ? AND id = ?');
         $stmt->execute([$gameId, $locationId]);
 
-        return (string) $stmt->fetchColumn();
+        return $stmt->fetch() ?: null;
     }
 
     /** @return list<string> */
@@ -409,36 +960,26 @@ final class GameEngine
         return $stmt->fetchAll(PDO::FETCH_COLUMN);
     }
 
-    /**
-     * A képpanel adatai (MCP Apps): a játékos aktuális állapota egy helyen.
-     */
-    private function panel(int $playerId, array $game): array
+    /** A képpanel adatai (MCP Apps): a játékos aktuális állapota egy helyen. */
+    private function panel(Context $ctx): array
     {
-        $save = $this->save($playerId, $game['id']);
-        $loc  = $this->describeLocation($game['id'], $save['location_id']);
-
-        $stmt = $this->db->prepare(
-            'SELECT i.name, si.quantity FROM save_items si
-             JOIN items i ON i.game_id = si.game_id AND i.id = si.item_id
-             WHERE si.player_id = ? AND si.game_id = ? ORDER BY i.name'
-        );
-        $stmt->execute([$playerId, $game['id']]);
+        $loc = $this->describeLocation($ctx, $ctx->location);
 
         return [
-            'jatek'     => $game['title'],
-            'helyszin'  => $loc['nev'],
-            'kep'       => $loc['kep'],
-            'ido'       => self::formatTime((int) $save['game_minute']),
-            'tulajdonsagok' => $this->state($save, $game['id'])->statsView(),
-            'leltar'    => array_map(
-                fn (array $r) => ['nev' => $r['name'], 'darab' => (int) $r['quantity']],
-                $stmt->fetchAll()
-            ),
-            'kijaratok' => array_map(
-                fn (array $e) => ['irany' => Direction::label($e['irany']), 'celpont' => $e['celpont']],
+            'jatek'         => $ctx->game['title'],
+            'helyszin'      => $loc['nev'],
+            'kep'           => $loc['kep'] ?? null,
+            'ido'           => self::formatTime($ctx->minute),
+            'napszak'       => $ctx->dayPart(),
+            'tulajdonsagok' => $ctx->state->statsView(),
+            'leltar'        => $ctx->world->inventoryTree(),
+            'itt'           => array_map(fn ($n) => ['nev' => $n['nev'], 'darab' => $n['darab']], $ctx->world->locationTree($ctx->location)),
+            'kijaratok'     => array_map(
+                fn (array $e) => ['irany' => Direction::label($e['irany']), 'celpont' => $e['celpont'], 'akadaly' => !empty($e['akadaly'])],
                 $loc['kijaratok']
             ),
-            'zene'      => null, // később: a játék hangulatzene-oldala
+            'vege'          => $ctx->state->end(),
+            'zene'          => null, // később: a játék hangulatzene-oldala
         ];
     }
 
@@ -446,10 +987,33 @@ final class GameEngine
      * A helyszín képének nyilvános címe.
      * 1. ha az adatbázisban meg van adva (locations.image): azt használja
      *    (teljes URL, vagy az assets/images mappához képesti útvonal);
+     * 0. ha a mentésben a "kep:<helyszín>" jelző egy változatot ad meg, és van ilyen fájl: <helyszín>~<változat>.webp;
+     *    utána a napszak szerinti változat: <helyszín>~ejszaka.webp (hajnal, nappal, este, ejszaka)
      * 2. különben megkeresi az assets/images/<játék>/<helyszín>.webp|jpg|jpeg|png fájlt.
      */
-    private function imageFor(string $gameId, array $loc): ?string
+    private function imageFor(string $gameId, array $loc, ?State $state = null, ?int $minute = null): ?string
     {
+        // Képváltozat: a "kep:<helyszín>" jelző értéke, pl. park_pad~ejjel.webp
+        $variants = [];
+        $flag = $state?->flag('kep:'.$loc['id']);
+        if (is_string($flag)) {
+            $variants[] = $flag;
+        }
+        if ($minute !== null) {
+            $variants[] = Context::dayPartOf($minute); // pl. park_pad~ejszaka.webp
+        }
+        foreach ($variants as $variant) {
+            if (!preg_match('/^[a-z0-9_-]+$/', $variant) || $this->imageDir === null || $this->imageUrl === null) {
+                continue;
+            }
+            foreach (self::IMAGE_EXTENSIONS as $ext) {
+                $relative = $gameId.'/'.$loc['id'].'~'.$variant.'.'.$ext;
+                if (is_file($this->imageDir.'/'.$relative)) {
+                    return $this->imageUrl.'/'.$relative.'?v='.filemtime($this->imageDir.'/'.$relative);
+                }
+            }
+        }
+
         if (!empty($loc['image'])) {
             return preg_match('#^https?://#', $loc['image'])
                 ? $loc['image']
@@ -477,14 +1041,5 @@ final class GameEngine
         $inDay = $minute % 1440;
 
         return sprintf('%d. nap, %02d:%02d', $day, intdiv($inDay, 60), $inDay % 60);
-    }
-
-    /** Kisbetűs, ékezet- és írásjelmentes alak az összehasonlításhoz. */
-    private static function simplify(string $s): string
-    {
-        $s = mb_strtolower(trim($s));
-        $s = strtr($s, ['á' => 'a', 'é' => 'e', 'í' => 'i', 'ó' => 'o', 'ö' => 'o', 'ő' => 'o', 'ú' => 'u', 'ü' => 'u', 'ű' => 'u']);
-
-        return trim((string) preg_replace('/[^a-z0-9]+/', ' ', $s));
     }
 }

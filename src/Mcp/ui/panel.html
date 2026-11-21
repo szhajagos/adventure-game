@@ -42,7 +42,7 @@
              background: linear-gradient(0deg, rgba(10,8,30,.85), rgba(10,8,30,0)); color: #fff; }
 
   /* Adatok */
-  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px 14px; margin-top: 10px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px 14px; margin-top: 10px; }
   .stat label { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
   .bar { height: 8px; background: var(--panel); border: 1px solid #3a3670; margin-top: 3px; }
   .bar i { display: block; height: 100%; transition: width .4s ease; }
@@ -51,7 +51,17 @@
   .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
   .chips { display: flex; flex-wrap: wrap; gap: 4px; }
   .chip { border: 1px solid #3a3670; background: var(--panel); padding: 1px 7px; font-size: 12px; }
+  .chip small { color: var(--muted); font-size: 10px; margin-right: 4px; text-transform: uppercase; letter-spacing: .04em; }
+  .chip em { color: var(--muted); font-style: normal; }
+  .chip.ground { border-style: dashed; }
   .exits { color: var(--muted); font-size: 12px; }
+  .exits .locked { opacity: .55; }
+  .end { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column;
+         gap: 4px; background: rgba(10,8,30,.72); color: #fff; text-align: center; padding: 12px; }
+  .end b { font-size: 20px; letter-spacing: .2em; text-transform: uppercase; }
+  .end.win b { color: var(--good); }
+  .end.lose b { color: var(--bad); }
+  .end span { font-size: 12px; opacity: .85; }
   .exits b { color: var(--text); font-weight: 600; }
   .music { margin-left: auto; background: none; border: 1px solid var(--frame); color: var(--frame); font: inherit;
            font-size: 12px; padding: 3px 8px; cursor: pointer; }
@@ -71,6 +81,7 @@
       <img id="img" alt="" hidden>
       <div class="placeholder" id="ph"><div class="hills"></div><span>kép hamarosan</span></div>
       <div class="caption" id="place"></div>
+      <div class="end" id="end" hidden><b id="endTitle"></b><span id="endText"></span></div>
     </div>
 
     <div class="stats" id="stats"></div>
@@ -81,6 +92,10 @@
       <span class="label">Leltár</span>
       <div class="chips" id="inv"></div>
       <button class="music" id="music" hidden>♪ Hangulatzene</button>
+    </div>
+    <div class="row" id="hereRow" hidden>
+      <span class="label">Itt</span>
+      <div class="chips" id="here"></div>
     </div>
     <div class="row exits" id="exits"></div>
   </div>
@@ -186,7 +201,8 @@
 
     $('empty').hidden = true; $('content').hidden = false;
     $('game').textContent = p.jatek || 'MCP Adventure';
-    $('time').textContent = p.ido || '';
+    const parts = { hajnal: '🌅 hajnal', nappal: '☀ nappal', este: '🌇 este', ejszaka: '🌙 éjszaka' };
+    $('time').textContent = (p.ido || '') + (p.napszak ? ' · ' + (parts[p.napszak] || p.napszak) : '');
     $('place').textContent = p.helyszin || '';
 
     const img = $('img');
@@ -203,12 +219,36 @@
 
     renderStats(p.tulajdonsagok);
 
+    // Leltár: hol van (kéz, zseb, hát), és a tárolók tartalma
+    const name = (it) => it.darab > 1 ? `${it.nev} ×${it.darab}` : it.nev;
     const inv = $('inv'); inv.replaceChildren();
     const items = p.leltar || [];
-    if (!items.length) { const s = document.createElement('span'); s.className = 'chip'; s.textContent = 'üres'; inv.append(s); }
+    if (!items.length) { const s = document.createElement('span'); s.className = 'chip'; s.textContent = 'üres kézzel'; inv.append(s); }
     for (const it of items) {
       const s = document.createElement('span'); s.className = 'chip';
-      s.textContent = it.darab > 1 ? `${it.nev} ×${it.darab}` : it.nev; inv.append(s);
+      if (it.hol) { const w = document.createElement('small'); w.textContent = it.hol; s.append(w); }
+      s.append(name(it));
+      if (Array.isArray(it.tartalom)) {
+        const c = document.createElement('em');
+        c.textContent = ' (' + (it.tartalom.length ? it.tartalom.map(name).join(', ') : 'üres') + ')';
+        s.append(c);
+      }
+      inv.append(s);
+    }
+
+    const here = $('here'); here.replaceChildren();
+    for (const it of p.itt || []) {
+      const s = document.createElement('span'); s.className = 'chip ground'; s.textContent = name(it); here.append(s);
+    }
+    $('hereRow').hidden = !(p.itt || []).length;
+
+    // A játék vége
+    const end = p.vege;
+    $('end').hidden = !end;
+    if (end) {
+      $('end').className = 'end ' + (end.tipus === 'gyozelem' ? 'win' : 'lose');
+      $('endTitle').textContent = end.tipus === 'gyozelem' ? 'Győzelem' : 'Vége';
+      $('endText').textContent = end.tipus === 'gyozelem' ? 'A kaland véget ért.' : 'Visszatérhetsz az ellenőrző ponthoz.';
     }
 
     const ex = $('exits'); ex.replaceChildren();
@@ -216,7 +256,9 @@
     for (const e of p.kijaratok || []) {
       const s = document.createElement('span');
       const b = document.createElement('b'); b.textContent = e.irany;
-      s.append(b, ' → ' + e.celpont); ex.append(s);
+      s.append(b, ' → ' + e.celpont + (e.akadaly ? ' 🔒' : ''));
+      if (e.akadaly) { s.className = 'locked'; s.title = 'Most nem járható'; }
+      ex.append(s);
     }
 
     musicUrl = p.zene || null;

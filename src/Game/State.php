@@ -189,6 +189,58 @@ final class State
         }
     }
 
+    // --- a játék vége ----------------------------------------------------------
+
+    /** @return array{tipus: string, szoveg: string}|null */
+    public function end(): ?array
+    {
+        return isset($this->data['vege']) && is_array($this->data['vege']) ? $this->data['vege'] : null;
+    }
+
+    public function setEnd(?array $end): void
+    {
+        if ($end === null) {
+            unset($this->data['vege']);
+        } else {
+            $this->data['vege'] = $end;
+        }
+    }
+
+    public function hasStat(string $id): bool
+    {
+        return isset($this->defs[$id]);
+    }
+
+    /** A tulajdonság óránkénti változása (a game_stats per_hour mezője) */
+    public function perHour(string $id): float
+    {
+        return (float) ($this->defs[$id]['per_hour'] ?? 0);
+    }
+
+    public function maxOf(string $id): ?float
+    {
+        $v = $this->defs[$id]['max_value'] ?? null;
+
+        return $v === null ? null : (float) $v;
+    }
+
+    public function minOf(string $id): ?float
+    {
+        $v = $this->defs[$id]['min_value'] ?? null;
+
+        return $v === null ? null : (float) $v;
+    }
+
+    /** Éjfélkor: a „napi_” kezdetű számlálók nullázódnak (pl. napi_pihenes) */
+    public function resetDaily(): void
+    {
+        foreach (array_keys($this->data['counters']) as $k) {
+            if (str_starts_with((string) $k, 'napi_')) {
+                unset($this->data['counters'][$k]);
+            }
+        }
+    }
+
     private function clamp(string $id, float $v): float
     {
         $d = $this->defs[$id] ?? null;

@@ -28,8 +28,30 @@ final class ServerFactory
         - Ha a játékos még nem választott, vagy más játékot szeretne, hívd a jatekok eszközt, mutasd be röviden
           a lehetőségeket (ha van saját állása, említsd meg), majd a jatek_inditasa eszközzel indítsd el a választottat.
         - Ha a játékos folytatni szeretné a játékot, és nem tudod, hol tart, hívd a korulnez eszközt.
-        - A jatek_inditasa, a menj és az uj_jatek válasza már tartalmazza az új helyszín teljes leírását
-          (és a képpanelt). Ezek után NE hívd külön a korulnez vagy az allapot eszközt – egy lépéshez egy eszközhívás elég.
+        - Minden játékeszköz válasza tartalmazza a helyszín aktuális leírását (és a képpanelt).
+          Utána NE hívd külön a korulnez vagy az allapot eszközt – egy lépéshez egy eszközhívás elég.
+
+        Tárgyak:
+        - A játékosnak két keze, zsebe és (hátizsák esetén) háta van; a táskák, szatyrok tárolók.
+          A felvesz magától a legjobb helyre teszi a tárgyat; a „hova” mezőt csak akkor add meg, ha a játékos kéri.
+        - Ha valami nem fér el, mondd el a játékosnak, és javasold, hogy tegyen le vagy rakjon el valamit.
+        - A tárgyakat a nevükkel add meg (ahogy a válaszban szerepelnek). Ha a válasz „lehetosegek” listát ad,
+          kérdezd meg a játékost, melyikre gondolt.
+        - A „reszletek” mezőben olyan apróságok lehetnek, amelyeket csak alapos vizsgálat derít ki – ezeket meséld el.
+
+        Test és idő:
+        - Az idő csak a játékos lépéseivel telik. A „napszak” mező (hajnal, nappal, este, éjszaka) adja a hangulatot:
+          éjjel sötét van, csend, hideg; ezt sződ bele a leírásba.
+        - Ha a játékos fáradt, aludhat (alszik), napközben egyszer rövidet pihenhet (pihen); mosdónál vagy fürdőben
+          tisztálkodhat (tisztalkodik); ha valamire várni akar (pl. a bolt nyitására), a var eszköz telteti az időt.
+        - Ha egy hely zárva van, a válasz megmondja a nyitvatartást; javasolhatod, hogy a játékos várjon.
+
+        Események és a játék vége:
+        - Az „esemenyek” lista a játék szabályaiból jön: ezek megtörtént dolgok, mindig sződ bele őket a mesébe.
+        - A „valtozasok” lista a tulajdonságok változása; ha jelentős, említsd meg.
+        - Az „akadaly” jelű kijárat látszik, de most nem járható; ha a játékos arra indul, a válasz megmondja, miért.
+        - Ha a válaszban „vege” mező van, a játék véget ért: kövesd a „teendo” mezőt. Győzelem után nincs több lépés;
+          vereség után felajánlhatod a vissza_ellenorzo_ponthoz eszközt.
 
         Mesélés:
         - Mindig magyarul, második személyben, élvezetes, de tömör prózában meséld el, mi történik (2–5 mondat).
@@ -56,7 +78,7 @@ final class ServerFactory
         $panel  = ['ui' => new UiToolMeta(resourceUri: self::PANEL_URI, visibility: [ToolVisibility::Model, ToolVisibility::App])];
 
         return Server::builder()
-            ->setServerInfo('MCP Adventure', '0.3.0')
+            ->setServerInfo('MCP Adventure', '0.5.0')
             ->setInstructions(self::INSTRUCTIONS)
             ->enableExtension(new McpApps())
             ->addResource(
@@ -118,8 +140,8 @@ final class ServerFactory
                 name: 'menj',
                 meta: $panel,
                 title: 'Menj',
-                description: 'A játékos elmegy a megadott irányba. Csak a korulnez által felsorolt kijáratok használhatók. '
-                    .'A mozgás játékidőt visz el, és növeli az éhséget és a fáradtságot.',
+                description: 'A játékos elmegy a megadott irányba. Csak a helyszín leírásában felsorolt kijáratok használhatók. '
+                    .'A mozgás játékidőt visz el, ami a játékos tulajdonságait (pl. éhség, fáradtság) is változtatja.',
                 annotations: new ToolAnnotations(title: 'Menj', readOnlyHint: false, destructiveHint: false),
                 inputSchema: [
                     'type' => 'object',
@@ -142,6 +164,124 @@ final class ServerFactory
                 inputSchema: $noArgs,
             )
             ->addTool(
+                fn (string $targy, ?int $darab = null, ?string $hova = null): array => $engine->take($playerId, $targy, $darab, $hova),
+                name: 'felvesz',
+                meta: $panel,
+                title: 'Felvesz',
+                description: 'A játékos felvesz egy tárgyat a helyszínről (a földről vagy egy itt lévő tárolóból). '
+                    .'A tárgy magától a legjobb helyre kerül (hátizsák, táska, zseb, szabad kéz), ha van hely.',
+                annotations: new ToolAnnotations(title: 'Felvesz', readOnlyHint: false, destructiveHint: false),
+                inputSchema: self::schema([
+                    'targy' => ['string', 'A tárgy neve, ahogy a helyszín leírásában szerepel.'],
+                    'darab' => ['integer', 'Hány darabot (alapból mindet).'],
+                    'hova'  => ['string', 'Csak ha a játékos kéri: bal kéz, jobb kéz, zseb, hát, vagy egy nála lévő tároló neve.'],
+                ], ['targy']),
+            )
+            ->addTool(
+                fn (string $targy, ?int $darab = null): array => $engine->drop($playerId, $targy, $darab),
+                name: 'letesz',
+                meta: $panel,
+                title: 'Letesz',
+                description: 'A játékos letesz egy nála lévő tárgyat a helyszínen. Egy tároló a tartalmával együtt kerül le.',
+                annotations: new ToolAnnotations(title: 'Letesz', readOnlyHint: false, destructiveHint: false),
+                inputSchema: self::schema([
+                    'targy' => ['string', 'A nála lévő tárgy neve.'],
+                    'darab' => ['integer', 'Hány darabot (alapból mindet).'],
+                ], ['targy']),
+            )
+            ->addTool(
+                fn (string $targy, string $tarolo, ?int $darab = null): array => $engine->putIn($playerId, $targy, $tarolo, $darab),
+                name: 'belerak',
+                meta: $panel,
+                title: 'Belerak',
+                description: 'A játékos belerak egy tárgyat egy tárolóba (táska, szatyor, doboz…), ami nála vagy a helyszínen van.',
+                annotations: new ToolAnnotations(title: 'Belerak', readOnlyHint: false, destructiveHint: false),
+                inputSchema: self::schema([
+                    'targy'  => ['string', 'A berakandó tárgy neve.'],
+                    'tarolo' => ['string', 'A tároló neve.'],
+                    'darab'  => ['integer', 'Hány darabot (alapból mindet).'],
+                ], ['targy', 'tarolo']),
+            )
+            ->addTool(
+                fn (string $targy, string $tarolo, ?int $darab = null): array => $engine->takeOut($playerId, $targy, $tarolo, $darab),
+                name: 'kivesz',
+                meta: $panel,
+                title: 'Kivesz',
+                description: 'A játékos kivesz egy tárgyat egy tárolóból; a tárgy a kezébe vagy a zsebébe kerül.',
+                annotations: new ToolAnnotations(title: 'Kivesz', readOnlyHint: false, destructiveHint: false),
+                inputSchema: self::schema([
+                    'targy'  => ['string', 'A kiveendő tárgy neve.'],
+                    'tarolo' => ['string', 'A tároló neve.'],
+                    'darab'  => ['integer', 'Hány darabot (alapból mindet).'],
+                ], ['targy', 'tarolo']),
+            )
+            ->addTool(
+                fn (string $targy): array => $engine->examine($playerId, $targy),
+                name: 'megvizsgal',
+                meta: $panel,
+                title: 'Megvizsgál',
+                description: 'A játékos alaposan megnéz egy tárgyat (nála vagy a helyszínen). Néha rejtett részletekre derül fény, '
+                    .'például mi áll egy újságban, vagy mi van egy táskában.',
+                annotations: new ToolAnnotations(title: 'Megvizsgál', readOnlyHint: false, destructiveHint: false),
+                inputSchema: self::schema(['targy' => ['string', 'A tárgy neve.']], ['targy']),
+            )
+            ->addTool(
+                fn (string $targy): array => $engine->consume($playerId, $targy),
+                name: 'fogyaszt',
+                meta: $panel,
+                title: 'Elfogyaszt',
+                description: 'A játékos megeszik vagy megiszik valamit, ami nála vagy a helyszínen van.',
+                annotations: new ToolAnnotations(title: 'Elfogyaszt', readOnlyHint: false, destructiveHint: false),
+                inputSchema: self::schema(['targy' => ['string', 'Az étel vagy ital neve.']], ['targy']),
+            )
+            ->addTool(
+                fn (?int $ora = null): array => $engine->sleep($playerId, $ora),
+                name: 'alszik',
+                meta: $panel,
+                title: 'Alszik',
+                description: 'A játékos lefekszik aludni. Óránként nő az energiája (ágyban jobban, máshol kevésbé), '
+                    .'és felébred, ha kipihente magát. Közben telik az idő.',
+                annotations: new ToolAnnotations(title: 'Alszik', readOnlyHint: false, destructiveHint: false),
+                inputSchema: self::schema(['ora' => ['integer', 'Legfeljebb hány órát aludjon (1–12, alapból 8).']], []),
+            )
+            ->addTool(
+                fn (): array => $engine->rest($playerId),
+                name: 'pihen',
+                meta: $panel,
+                title: 'Pihen',
+                description: 'A játékos fél órát pihen: kicsit nő az energiája. Naponta korlátozott alkalommal.',
+                annotations: new ToolAnnotations(title: 'Pihen', readOnlyHint: false, destructiveHint: false),
+                inputSchema: $noArgs,
+            )
+            ->addTool(
+                fn (): array => $engine->wash($playerId),
+                name: 'tisztalkodik',
+                meta: $panel,
+                title: 'Tisztálkodik',
+                description: 'A játékos megmosakszik vagy megfürdik (csak mosdónál vagy fürdőben). A higiéniája a maximumra nő.',
+                annotations: new ToolAnnotations(title: 'Tisztálkodik', readOnlyHint: false, destructiveHint: false),
+                inputSchema: $noArgs,
+            )
+            ->addTool(
+                fn (int $perc): array => $engine->wait($playerId, $perc),
+                name: 'var',
+                meta: $panel,
+                title: 'Vár',
+                description: 'A játékos vár: telik az idő (5 perctől 12 óráig). Pl. amíg kinyit egy bolt.',
+                annotations: new ToolAnnotations(title: 'Vár', readOnlyHint: false, destructiveHint: false),
+                inputSchema: self::schema(['perc' => ['integer', 'Hány percet várjon (5–720).']], ['perc']),
+            )
+            ->addTool(
+                fn (): array => $engine->restoreCheckpoint($playerId),
+                name: 'vissza_ellenorzo_ponthoz',
+                meta: $panel,
+                title: 'Vissza az ellenőrző ponthoz',
+                description: 'Vereség után (vagy ha a játékos teljesen elakadt, és kéri) visszaviszi a játékost a legutóbbi ellenőrző ponthoz. '
+                    .'Az azóta történtek elvesznek. Csak a játékos kérésére használd.',
+                annotations: new ToolAnnotations(title: 'Vissza az ellenőrző ponthoz', readOnlyHint: false, destructiveHint: true),
+                inputSchema: $noArgs,
+            )
+            ->addTool(
                 fn (): array => $engine->restart($playerId),
                 name: 'uj_jatek',
                 meta: $panel,
@@ -152,5 +292,16 @@ final class ServerFactory
                 inputSchema: $noArgs,
             )
             ->build();
+    }
+
+    /** @param array<string, array{0: string, 1: string}> $props név => [típus, leírás] */
+    private static function schema(array $props, array $required): array
+    {
+        $out = [];
+        foreach ($props as $name => [$type, $desc]) {
+            $out[$name] = ['type' => $type, 'description' => $desc];
+        }
+
+        return ['type' => 'object', 'properties' => $out, 'required' => $required];
     }
 }
