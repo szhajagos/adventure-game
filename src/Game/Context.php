@@ -74,6 +74,8 @@ final class Context
                     if ($this->minute % 1440 === 0) {
                         $this->midnight();
                     }
+                    $this->decay();
+                    $this->weatherOnFires();
                     if ($this->minute % 1440 === 60 * (int) ($this->settings['keszletpotlas_ora'] ?? 6)) {
                         $this->state->resetPrefix('keszlet:'); // a kereskedők készlete reggel pótlódik
                     }
@@ -114,7 +116,20 @@ final class Context
     /** @return list<string> az aktuális helyszín felszereltsége */
     public function features(): array
     {
-        return $this->featureMap[$this->location] ?? [];
+        $f = $this->featureMap[$this->location] ?? [];
+        if ($this->fireAt($this->location)) {
+            $f[] = 'tuz'; // ég itt egy tűz
+        }
+
+        return $f;
+    }
+
+    /** Ég-e tűz a helyszínen (meddig), a mentés szerint */
+    public function fireAt(string $location): ?int
+    {
+        $until = (int) (($this->state->extra('tuz') ?? [])[$location] ?? 0);
+
+        return $until > $this->minute ? $until : null;
     }
 
     // =====================================================================
@@ -142,6 +157,57 @@ final class Context
                 return;
             }
         }
+    }
+
+    /**
+     * Romlás: a „romlik” jellemzőjű tárgyak a koruk alapján átalakulnak (kifli → száraz kifli),
+     * vagy ha nincs mivé, megsemmisülnek. Csak a játékosnál vagy a helyszínen történtekről szól.
+     */
+    private function decay(): void
+    {
+        foreach ($this->world->all() as $inst) {
+            $rot = $this->world->props($inst['item_id'])['romlik'] ?? null;
+            if (!is_array($rot) || empty($rot['ora']) || $this->minute - (int) $inst['created_minute'] < (int) round((float) $rot['ora'] * 60)) {
+                continue;
+            }
+            $cur = $this->world->get((int) $inst['id']);
+            if ($cur === null) {
+                continue;
+            }
+            [$pt, $pid] = $this->world->rootPlace($cur);
+            $seen = $pt === 'slot' || ($pt === 'location' && $pid === $this->location);
+            $name = $this->world->name($cur);
+            $to = (string) ($rot['mive'] ?? '');
+            if ($to !== '' && $this->world->type($to) !== null) {
+                $this->world->transform($cur, $to, $this->minute);
+                if ($seen) {
+                    $this->messages[] = sprintf('Az idő múlásával a(z) %s %s lett.', $name, $this->world->type($to)['name']);
+                }
+            } else {
+                $this->world->decrease($cur, (int) $cur['quantity']);
+                if ($seen) {
+                    $this->messages[] = sprintf('A(z) %s teljesen tönkrement, ki kellett dobni.', $name);
+                }
+            }
+        }
+    }
+
+    /** Az eső, a hó és a vihar eloltja a szabadban égő tüzet */
+    private function weatherOnFires(): void
+    {
+        $fires = $this->state->extra('tuz') ?? [];
+        if (!$fires || !in_array($this->state->weather(), ['esos', 'havas', 'viharos'], true)) {
+            return;
+        }
+        foreach ($fires as $loc => $until) {
+            if ($until > $this->minute && in_array('szabadter', $this->featureMap[$loc] ?? [], true)) {
+                unset($fires[$loc]);
+                if ($loc === $this->location) {
+                    $this->messages[] = 'Az időjárás eloltotta a tüzet.';
+                }
+            }
+        }
+        $this->state->setExtra('tuz', $fires ?: null);
     }
 
     /** Éjfélkor: a lejárt kölcsönök késedelmi kamata, és a rendszeres költségek */

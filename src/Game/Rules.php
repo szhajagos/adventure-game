@@ -36,6 +36,8 @@ final class Rules
         'vesz'         => 'vásárol (a tárgy a megvett tárgy)',
         'elad'         => 'elad egy tárgyat',
         'dolgozik'     => 'elvégez egy munkát (munka: a munka azonosítója)',
+        'hasznal'      => 'használ egy tárgyat (targy: az eszköz, celpont: amin használja)',
+        'keszit'       => 'elkészít valamit egy recept szerint (targy: az elkészült tárgy)',
         'orankent'     => '– minden egész órában (az idő múlásával magától)',
         'ejfelkor'     => '– minden éjfélkor (a napi számlálók nullázása után)',
     ];
@@ -65,6 +67,8 @@ final class Rules
         'megbizas'      => ['["megbízás_id", "folyamatban"]', 'egy megbízás állapota (felajanlva nincs; folyamatban, teljesitve, elbukott, elutasitva)'],
         'tartozik'      => ['"szereplő_id"', 'a játékosnak kölcsöntartozása van a szereplő felé'],
         'munka'         => ['"munka_id"', 'a dolgozik művelet munkája ez'],
+        'celpont'       => ['"tárgy_id" vagy "felszereltség"', 'a használ művelet célpontja (egy tárgy vagy a helyszín felszereltsége, pl. ivokut)'],
+        'jarmuben'      => ['"tárgy_id" vagy true', 'a játékos (ebben) a járműben ül'],
         'veletlen'      => ['szám (0–100)', 'ennyi százalék eséllyel teljesül'],
     ];
 
@@ -89,6 +93,9 @@ final class Rules
     /** @var list<array> */
     private array $rules;
 
+    /** Az utolsó around() hívásban hány szabály teljesült (a „használ” ebből tudja, volt-e hatása) */
+    public int $lastMatched = 0;
+
     public function __construct(PDO $db, string $gameId)
     {
         $stmt = $db->prepare('SELECT * FROM rules WHERE game_id = ? AND active = 1 ORDER BY priority, id');
@@ -109,6 +116,7 @@ final class Rules
     public function around(Context $ctx, array $event, callable $action): array
     {
         $matched = $this->matching($ctx, $event);
+        $this->lastMatched = count($matched);
 
         foreach ($matched as $rule) {
             if ($this->hasEffect($rule, 'tiltas')) {
@@ -222,6 +230,9 @@ final class Rules
             'megbizas'      => is_array($v) && ($st->quest((string) $v[0])['allapot'] ?? null) === ($v[1] ?? 'folyamatban'),
             'tartozik'      => $st->loan((string) $v) !== null,
             'munka'         => ($event['munka'] ?? null) === $v,
+            'celpont'       => ($event['celpont'] ?? null) === $v,
+            'jarmuben'      => $v === true ? $st->extra('jarmu') !== null
+                : (($j = $st->extra('jarmu')) !== null && ($ctx->world->get((int) $j)['item_id'] ?? null) === $v),
             'veletlen'      => $st->random(1, 100) <= (int) $v,
             default         => false,
         };
@@ -339,7 +350,12 @@ final class Rules
                 }
                 foreach (array_merge($w->carried(), $w->atLocationDeep($ctx->location)) as $inst) {
                     if ($inst['item_id'] === $v[0]) {
-                        $w->transform($inst, (string) $v[1]);
+                        if ((int) $inst['quantity'] > 1) {  // egy darab alakul át a halomból
+                            $w->decrease($inst, 1);
+                            $w->create((string) $v[1], 1, $inst['place_type'], $inst['place_id'], $ctx->minute);
+                        } else {
+                            $w->transform($inst, (string) $v[1], $ctx->minute);
+                        }
                         break;
                     }
                 }

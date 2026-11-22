@@ -369,11 +369,38 @@ final class World
         $this->reload();
     }
 
-    /** Átalakítás: a példány más tárgytípussá válik (pl. száraz kifli, ázott könyv) */
-    public function transform(array $inst, string $toItemId): void
+    /** Átalakítás: a példány más tárgytípussá válik (pl. száraz kifli, ázott könyv); az új tárgy kora és kopása nulláról indul */
+    public function transform(array $inst, string $toItemId, ?int $minute = null): void
     {
-        $this->db->prepare('UPDATE item_instances SET item_id = ? WHERE id = ?')->execute([$toItemId, $inst['id']]);
+        $this->db->prepare('UPDATE item_instances SET item_id = ?, wear = 0, created_minute = COALESCE(?, created_minute) WHERE id = ?')
+            ->execute([$toItemId, $minute, $inst['id']]);
         $this->reload();
+    }
+
+    public function setWear(array $inst, int $wear): void
+    {
+        $this->db->prepare('UPDATE item_instances SET wear = ? WHERE id = ?')->execute([$wear, $inst['id']]);
+        $this->reload();
+    }
+
+    /** @return list<array> a mentés összes tárgypéldánya */
+    public function all(): array
+    {
+        return array_values($this->inst);
+    }
+
+    /** Hol van a példány „végső soron” (a tárolókon át): ['location', helyszín] vagy ['slot', …] vagy ['npc', …] */
+    public function rootPlace(array $inst): array
+    {
+        for ($i = 0; $inst['place_type'] === 'container' && $i < 20; $i++) {
+            $parent = $this->get((int) $inst['place_id']);
+            if ($parent === null) {
+                break;
+            }
+            $inst = $parent;
+        }
+
+        return [$inst['place_type'], $inst['place_id']];
     }
 
     // =====================================================================

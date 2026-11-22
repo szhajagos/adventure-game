@@ -260,13 +260,19 @@
     $('taskRow').hidden = !(p.feladatok || []).length;
 
     const here = $('here'); here.replaceChildren();
+    const extra = [];
+    if (p.tuz) extra.push('🔥 ég a tűz');
+    if (p.jarmu) extra.push('🚲 ' + p.jarmu);
+    for (const t of extra) {
+      const s = document.createElement('span'); s.className = 'chip person'; s.textContent = t; here.append(s);
+    }
     for (const n of p.szereplok || []) {
       const s = document.createElement('span'); s.className = 'chip person'; s.textContent = '👤 ' + n; here.append(s);
     }
     for (const it of p.itt || []) {
       const s = document.createElement('span'); s.className = 'chip ground'; s.textContent = name(it); here.append(s);
     }
-    $('hereRow').hidden = !((p.itt || []).length + (p.szereplok || []).length);
+    $('hereRow').hidden = !((p.itt || []).length + (p.szereplok || []).length + extra.length);
 
     // Képrétegek: tárgyak és szereplők a helyszínképen; ami nem töltődik be, az egyszerűen kimarad
     const layers = $('layers'); layers.replaceChildren();

@@ -277,6 +277,21 @@ final class State
         return $this->data['loans'];
     }
 
+    /** Általános, rétegenként bővülő adat a mentésben (pl. tüzek, jármű) */
+    public function extra(string $key): mixed
+    {
+        return $this->data['x'][$key] ?? null;
+    }
+
+    public function setExtra(string $key, mixed $value): void
+    {
+        if ($value === null) {
+            unset($this->data['x'][$key]);
+        } else {
+            $this->data['x'][$key] = $value;
+        }
+    }
+
     public function weather(): ?string
     {
         return isset($this->data['idojaras']) ? (string) $this->data['idojaras'] : null;

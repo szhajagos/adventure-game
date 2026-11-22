@@ -20,7 +20,7 @@ final class AdminApp
 {
     private const ID_PATTERN = '/^[a-z0-9_]{1,50}$/';
     private const IMAGE_EXT = ['webp', 'jpg', 'jpeg', 'png'];
-    private const FEATURES = ['fedett', 'szabadter', 'mosdo', 'furdo', 'agy', 'bolt', 'konyha', 'ules', 'aram', 'viz'];
+    private const FEATURES = ['fedett', 'szabadter', 'mosdo', 'furdo', 'agy', 'bolt', 'konyha', 'ules', 'aram', 'viz', 'tuzrakohely', 'ivokut'];
 
     private const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
     private const LOCATION_GOAL = 50;
@@ -90,6 +90,7 @@ final class AdminApp
                 'npc'      => $this->pageNpc(),
                 'topic'    => $this->pageTopic(),
                 'quest'    => $this->pageQuest(),
+                'recipe'   => $this->pageRecipe(),
                 'export'   => $this->export(),
                 default    => $this->pageHome(),
             };
@@ -247,6 +248,9 @@ final class AdminApp
             .'<h2>Szereplők</h2><p class="muted">Akikkel a játékos beszélhet, kereskedhet. A mesélő az adatlapjuk alapján beszél a nevükben.</p>'
             .'<div class="actions"><a class="btn" href="'.View::e(View::url(['p' => 'npc', 'g' => $gid])).'">+ Új szereplő</a></div><br>'
             .$this->npcsTable($gid)
+            .'<h2>Receptek</h2><p class="muted">Alapanyagokból (és eszközzel, egy helyen, pl. tűznél) készíthető tárgyak.</p>'
+            .'<div class="actions"><a class="btn" href="'.View::e(View::url(['p' => 'recipe', 'g' => $gid])).'">+ Új recept</a></div><br>'
+            .$this->recipesTable($gid)
             .'<h2>Megbízások</h2><p class="muted">Egy szereplő felajánlja; a célt és a határidőt a motor figyeli, a végén jutalom vagy büntetés jár.</p>'
             .'<div class="actions"><a class="btn" href="'.View::e(View::url(['p' => 'quest', 'g' => $gid])).'">+ Új megbízás</a></div><br>'
             .$this->questsTable($gid)
@@ -427,6 +431,9 @@ final class AdminApp
         $isNew = $item === null;
         $item ??= ['id' => '', 'name' => '', 'description' => '', 'price' => 0, 'nutrition' => 0, 'size' => 1, 'props' => '{}'];
         $pr = json_decode((string) $item['props'], true) ?: [];
+        $stmt = $this->db->prepare('SELECT id, name FROM items WHERE game_id = ? ORDER BY name');
+        $stmt->execute([$gid]);
+        $itemNames = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
         $chk = fn (string $name, string $label, bool $on) => '<label style="display:block;margin:6px 0"><input type="checkbox" name="'.$name.'" value="1"'.($on ? ' checked' : '').'> '.$label.'</label>';
 
         $body = '<form method="post" class="card">'.View::csrf().'<input type="hidden" name="a" value="save_item"><input type="hidden" name="g" value="'.View::e($gid).'">'
@@ -445,6 +452,24 @@ final class AdminApp
             .View::field('Csak ilyen tárolóban vihető (pl. folyadek)', 'needs', (string) ($pr['tarolot_igenyel'] ?? ''), 'text').'</div>'
             .$chk('backpack', 'Hátizsák: a hátán viszi, nem foglal kezet', ($pr['hely'] ?? '') === 'hat')
             .$chk('fixed', 'Nem vehető fel (bútor, nagy tárgy – de megvizsgálható, tárolóként használható)', !empty($pr['nem_felveheto']))
+            .'<h3>Haladó jellemzők</h3><div class="row">'
+            .View::field('Romlik ennyi óra után (üres = nem romlik)', 'rot_h', (string) ($pr['romlik']['ora'] ?? ''), 'number', ['min' => 0, 'step' => 'any'])
+            .View::select('…és ez lesz belőle', 'rot_to', ['' => '– elrohad, eltűnik –'] + $itemNames, (string) ($pr['romlik']['mive'] ?? ''))
+            .'</div><div class="row">'
+            .View::field('Tartósság: ennyi használat (üres = nem kopik)', 'dur', (string) ($pr['tartossag'] ?? ''), 'number', ['min' => 1])
+            .View::select('…utána ez lesz belőle', 'dur_to', ['' => '– elfogy, eltűnik –'] + $itemNames, (string) ($pr['torik_mive'] ?? ''))
+            .'</div><div class="row">'
+            .View::field('Éghető: ennyi órát ég (üres = nem ég)', 'burn', (string) ($pr['eghet'] ?? ''), 'number', ['min' => 0, 'step' => 'any'])
+            .View::field('Alvás ágy nélkül ennyivel jobb (0–1, pl. takaró: 0.8)', 'sleepmul', (string) ($pr['alvas_szorzo'] ?? ''), 'number', ['min' => 0, 'max' => 1, 'step' => 'any'])
+            .View::select('Elfogyasztás után ez marad', 'leftover', ['' => '– semmi –'] + $itemNames, (string) ($pr['marad'] ?? ''))
+            .'</div>'
+            .View::field('Elfogyasztáskor (hatások, JSON; pl. [{"tulajdonsag": ["jokedv", 5]}])', 'eat_fx', ($pr['fogyasztas_hatas'] ?? null) ? json_encode($pr['fogyasztas_hatas'], JSON_UNESCAPED_UNICODE) : '', 'text', ['class' => 'mono'])
+            .$chk('lighter', 'Gyújtó (gyufa, öngyújtó): tüzet lehet vele rakni', !empty($pr['gyujto']))
+            .$chk('vehicle', 'Jármű: be lehet szállni / fel lehet ülni rá', isset($pr['jarmu']))
+            .'<div class="row">'
+            .View::field('Jármű: az út ideje ennyiszerese (pl. 0.4)', 'speed', (string) ($pr['jarmu']['sebesseg'] ?? '0.5'), 'number', ['min' => 0.05, 'max' => 2, 'step' => 'any'])
+            .View::field('Jármű: ilyen felszereltségű helyekre mehet (vesszővel)', 'roads', implode(', ', (array) ($pr['jarmu']['utak'] ?? ['szabadter'])), 'text')
+            .'</div>'
             .'<h3>Céltárgy</h3>'
             .$chk('goal', 'Céltárgy: ha a játékoshoz kerül, a játék győzelemmel véget ér', !empty($pr['cel']))
             .View::field('Befejező szöveg (ezt meséli el az AI a győzelemkor)', 'ending', (string) ($pr['vege_szoveg'] ?? ''), 'textarea', ['rows' => 3])
@@ -615,6 +640,11 @@ final class AdminApp
                 if ((int) $stmt->fetchColumn() > 0) {
                     $this->fail('Ezt a tárgyat valaki árulja vagy felvásárolja; előbb töröld a kereskedési sorát.');
                 }
+                $stmt = $this->db->prepare('SELECT COUNT(*) FROM recipes WHERE game_id = ? AND (result_item = ? OR ingredients LIKE ? OR tools LIKE ?)');
+                $stmt->execute([$gid, $iid, '%"'.$iid.'"%', '%"'.$iid.'"%']);
+                if ((int) $stmt->fetchColumn() > 0) {
+                    $this->fail('Ez a tárgy egy receptben szerepel; előbb a receptet módosítsd.');
+                }
                 $this->db->prepare('DELETE FROM location_items WHERE game_id = ? AND item_id = ?')->execute([$gid, $iid]);
                 $this->db->prepare('DELETE FROM items WHERE game_id = ? AND id = ?')->execute([$gid, $iid]);
                 $this->ok('A tárgy törölve.', ['p' => 'game', 'g' => $gid]);
@@ -659,6 +689,14 @@ final class AdminApp
                 $this->db->prepare('DELETE FROM trades WHERE game_id = ? AND id = ?')->execute([$gid, (int) ($_POST['id'] ?? 0)]);
                 [$bt, $bid] = explode(':', (string) ($_POST['back'] ?? 'location:'), 2) + ['', ''];
                 $this->ok('Kereskedési sor törölve.', $bt === 'npc' ? ['p' => 'npc', 'g' => $gid, 'n' => $bid] : ['p' => 'loc', 'g' => $gid, 'l' => $bid]);
+
+            case 'save_recipe':
+                $this->saveRecipe($gid);
+
+            case 'delete_recipe':
+                $this->requireGame($gid);
+                $this->db->prepare('DELETE FROM recipes WHERE game_id = ? AND id = ?')->execute([$gid, (string) ($_POST['r'] ?? '')]);
+                $this->ok('A recept törölve.', ['p' => 'game', 'g' => $gid]);
 
             case 'save_quest':
                 $this->saveQuest($gid);
@@ -923,7 +961,7 @@ final class AdminApp
         $out = "-- MCP Adventure – a(z) „{$game['title']}” játék exportja\n-- Készült: ".date('Y-m-d H:i:s')."\n"
             ."-- Betöltés: phpMyAdmin → Importálás. Ha a játék már létezik, előbb töröld (lásd lent).\nSET NAMES utf8mb4;\n\n"
             ."-- DELETE FROM location_items WHERE game_id = ".$q($gid)."; DELETE FROM exits WHERE game_id = ".$q($gid).";\n"
-            ."-- DELETE FROM quests WHERE game_id = ".$q($gid)."; DELETE FROM jobs WHERE game_id = ".$q($gid).";\n"
+            ."-- DELETE FROM recipes WHERE game_id = ".$q($gid)."; DELETE FROM quests WHERE game_id = ".$q($gid)."; DELETE FROM jobs WHERE game_id = ".$q($gid).";\n"
             ."-- DELETE FROM trades WHERE game_id = ".$q($gid)."; DELETE FROM npc_topics WHERE game_id = ".$q($gid)."; DELETE FROM npcs WHERE game_id = ".$q($gid).";\n"
             ."-- DELETE FROM rules WHERE game_id = ".$q($gid)."; DELETE FROM game_stats WHERE game_id = ".$q($gid)."; DELETE FROM items WHERE game_id = ".$q($gid)."; DELETE FROM locations WHERE game_id = ".$q($gid)."; DELETE FROM games WHERE id = ".$q($gid).";\n\n";
 
@@ -937,6 +975,7 @@ final class AdminApp
             'npcs'           => ['SELECT * FROM npcs WHERE game_id = ? ORDER BY sort_order, id', []],
             'npc_topics'     => ['SELECT game_id, npc_id, title, keywords, content, conditions, effects, sort_order FROM npc_topics WHERE game_id = ? ORDER BY npc_id, sort_order, id', []],
             'trades'         => ['SELECT game_id, trader_type, trader_id, mode, item_id, price, price_item_id, daily_limit, conditions, sort_order FROM trades WHERE game_id = ? ORDER BY id', []],
+            'recipes'        => ['SELECT * FROM recipes WHERE game_id = ? ORDER BY id', []],
             'quests'         => ['SELECT * FROM quests WHERE game_id = ? ORDER BY sort_order, id', []],
             'jobs'           => ['SELECT * FROM jobs WHERE game_id = ? ORDER BY sort_order, id', []],
             'rules'          => ['SELECT game_id, name, trigger_action, conditions, effects, message, once, priority, active FROM rules WHERE game_id = ? ORDER BY priority, id', []],
@@ -1276,6 +1315,111 @@ JS;
         $this->db->prepare('UPDATE locations SET layers = ? WHERE game_id = ? AND id = ?')
             ->execute([json_encode($out ?: new \stdClass()), $gid, $lid]);
         $this->ok('A rétegek mentve.', ['p' => 'loc', 'g' => $gid, 'l' => $lid]);
+    }
+
+    // =====================================================================
+    //  Receptek
+    // =====================================================================
+
+    private function recipesTable(string $gid): string
+    {
+        $stmt = $this->db->prepare('SELECT r.*, i.name AS result_name FROM recipes r JOIN items i ON i.game_id = r.game_id AND i.id = r.result_item WHERE r.game_id = ? ORDER BY r.sort_order, r.name');
+        $stmt->execute([$gid]);
+        $rows = '';
+        foreach ($stmt->fetchAll() as $r) {
+            $rows .= '<tr><td><a href="'.View::e(View::url(['p' => 'recipe', 'g' => $gid, 'r' => $r['id']])).'"><b>'.View::e($r['name']).'</b></a></td>'
+                .'<td>'.View::e($r['result_name']).' ×'.(int) $r['result_qty'].'</td><td class="mono">'.View::e($r['ingredients']).'</td>'
+                .'<td class="mono">'.View::e($r['tools'] === '[]' ? '' : $r['tools']).' '.View::e($r['features'] === '[]' ? '' : $r['features']).'</td></tr>';
+        }
+
+        return $rows ? '<table><tr><th>Recept</th><th>Eredmény</th><th>Alapanyagok</th><th>Eszköz, hely</th></tr>'.$rows.'</table>' : '<p class="muted">Még nincs recept.</p>';
+    }
+
+    private function pageRecipe(): void
+    {
+        $game = $this->requireGame((string) ($_GET['g'] ?? ''));
+        $gid = $game['id'];
+        $rid = (string) ($_GET['r'] ?? '');
+        $r = null;
+        if ($rid !== '') {
+            $stmt = $this->db->prepare('SELECT * FROM recipes WHERE game_id = ? AND id = ?');
+            $stmt->execute([$gid, $rid]);
+            $r = $stmt->fetch() ?: $this->notFound();
+        }
+        $isNew = $r === null;
+        $r ??= ['id' => '', 'name' => '', 'description' => '', 'ingredients' => '[]', 'tools' => '[]', 'features' => '[]', 'minutes' => 15,
+            'result_item' => '', 'result_qty' => 1, 'conditions' => '[]', 'effects' => '[]', 'sort_order' => 100];
+        $stmt = $this->db->prepare('SELECT id, name FROM items WHERE game_id = ? ORDER BY name');
+        $stmt->execute([$gid]);
+        $items = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+        $ing = implode("\n", array_map(fn ($i) => $i['targy'].' '.(int) ($i['darab'] ?? 1), json_decode((string) $r['ingredients'], true) ?: []));
+        $pretty = fn (string $j) => ($d = json_decode($j, true)) ? json_encode($d, JSON_UNESCAPED_UNICODE) : '';
+
+        $body = '<form method="post" class="card">'.View::csrf().'<input type="hidden" name="a" value="save_recipe"><input type="hidden" name="g" value="'.View::e($gid).'">'
+            .($isNew ? '<input type="hidden" name="new" value="1">'.View::field('Azonosító', 'r', '', 'text', ['required' => true, 'pattern' => '[a-z0-9_]{1,50}'])
+                     : '<input type="hidden" name="r" value="'.View::e($r['id']).'"><p class="mono muted">Azonosító: '.View::e($r['id']).'</p>')
+            .View::field('Név', 'name', $r['name'], 'text', ['required' => true, 'maxlength' => 150])
+            .View::field('Hogyan készül (a mesélőnek)', 'description', (string) $r['description'], 'textarea', ['rows' => 2])
+            .'<div class="row">'.View::select('Eredmény', 'result_item', $items, $r['result_item'])
+            .View::field('Darab', 'result_qty', $r['result_qty'], 'number', ['min' => 1, 'max' => 99])
+            .View::field('Időtartam (perc)', 'minutes', $r['minutes'], 'number', ['min' => 0, 'max' => 1440]).'</div>'
+            .View::field('Alapanyagok (soronként: tárgy_id darab) – elfogynak', 'ingredients', $ing, 'textarea', ['rows' => 3, 'class' => 'mono', 'placeholder' => "ujsag 2"])
+            .View::field('Eszközök (tárgy_id-k vesszővel) – nem fogynak el, csak kopnak', 'tools', implode(', ', json_decode((string) $r['tools'], true) ?: []), 'text', ['class' => 'mono'])
+            .View::field('Hely (felszereltség vesszővel; „tuz” = égő tűz kell)', 'features', implode(', ', json_decode((string) $r['features'], true) ?: []), 'text', ['class' => 'mono'])
+            .View::field('Ki ismeri (feltételek, JSON; üres = mindenki)', 'conditions', $pretty((string) $r['conditions']), 'text', ['class' => 'mono', 'placeholder' => '[{"jelzo": "tudja_a_receptet"}]'])
+            .View::field('Hatások elkészítéskor (JSON)', 'effects', $pretty((string) $r['effects']), 'text', ['class' => 'mono'])
+            .'<p class="muted" style="font-size:13px">Tárgyak: <span class="mono">'.View::e(implode(', ', array_keys($items))).'</span></p>'
+            .'<button class="btn">'.($isNew ? 'Recept létrehozása' : 'Mentés').'</button></form>'
+            .($isNew ? '' : '<h2>Veszélyzóna</h2>'.View::postButton('Recept törlése', ['a' => 'delete_recipe', 'g' => $gid, 'r' => $r['id']], 'Törlöd a receptet?', 'btn danger'));
+
+        $title = $isNew ? 'Új recept' : $r['name'];
+        echo View::layout($title, $body, $this->user, $this->takeFlash(),
+            ['Játékok' => '/admin/', $game['title'] => View::url(['p' => 'game', 'g' => $gid]), $title => null]);
+    }
+
+    private function saveRecipe(string $gid): never
+    {
+        $this->requireGame($gid);
+        $rid = (string) ($_POST['r'] ?? '');
+        $stmt = $this->db->prepare('SELECT id FROM items WHERE game_id = ?');
+        $stmt->execute([$gid]);
+        $itemIds = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        $ingredients = [];
+        foreach (preg_split('/\R/', trim((string) ($_POST['ingredients'] ?? ''))) as $line) {
+            if (trim($line) === '') {
+                continue;
+            }
+            if (!preg_match('/^\s*([a-z0-9_]+)\s*(\d*)\s*$/', $line, $m) || !in_array($m[1], $itemIds, true)) {
+                $this->fail('Hibás alapanyagsor (tárgy_id darab): „'.$line.'”.');
+            }
+            $ingredients[] = ['targy' => $m[1], 'darab' => max(1, (int) ($m[2] ?: 1))];
+        }
+        $tools = self::csv((string) ($_POST['tools'] ?? ''));
+        foreach ($tools as $t) {
+            if (!in_array($t, $itemIds, true)) {
+                $this->fail('Nincs ilyen eszköz (tárgy): „'.$t.'”.');
+            }
+        }
+        $conds = trim((string) ($_POST['conditions'] ?? '')) ?: '[]';
+        $effects = trim((string) ($_POST['effects'] ?? '')) ?: '[]';
+        if ($errors = array_merge(Rules::validate($conds, Rules::CONDITIONS, 'feltételek'), Rules::validate($effects, Rules::EFFECTS, 'hatások'))) {
+            $this->fail(implode(' ', $errors));
+        }
+        $name = trim((string) ($_POST['name'] ?? ''));
+        if ($name === '' || !$ingredients && !$tools) {
+            $this->fail('A név és legalább egy alapanyag vagy eszköz kötelező.');
+        }
+        $vals = [$name, trim((string) ($_POST['description'] ?? '')) ?: null, json_encode($ingredients), json_encode($tools),
+            json_encode(self::csv((string) ($_POST['features'] ?? ''))), max(0, (int) ($_POST['minutes'] ?? 15)), (string) ($_POST['result_item'] ?? ''),
+            max(1, (int) ($_POST['result_qty'] ?? 1)), json_encode(json_decode($conds, true), JSON_UNESCAPED_UNICODE), json_encode(json_decode($effects, true), JSON_UNESCAPED_UNICODE)];
+        $cols = 'name = ?, description = ?, ingredients = ?, tools = ?, features = ?, minutes = ?, result_item = ?, result_qty = ?, conditions = ?, effects = ?';
+        if (!empty($_POST['new'])) {
+            $this->validId($rid, 'recept');
+            $this->db->prepare('INSERT INTO recipes SET '.$cols.', game_id = ?, id = ?')->execute([...$vals, $gid, $rid]);
+        } else {
+            $this->db->prepare('UPDATE recipes SET '.$cols.' WHERE game_id = ? AND id = ?')->execute([...$vals, $gid, $rid]);
+        }
+        $this->ok('A recept mentve.', ['p' => 'recipe', 'g' => $gid, 'r' => $rid]);
     }
 
     // =====================================================================
@@ -1961,6 +2105,22 @@ JS;
         $set('nem_felveheto', !empty($_POST['fixed']));
         $set('cel', !empty($_POST['goal']));
         $set('vege_szoveg', trim((string) ($_POST['ending'] ?? '')));
+        $num = fn (string $k) => trim((string) ($_POST[$k] ?? '')) === '' ? null : (float) $_POST[$k];
+        $set('romlik', ($h = $num('rot_h')) ? array_filter(['ora' => $h, 'mive' => (string) ($_POST['rot_to'] ?? '')]) : null);
+        $set('tartossag', ($d = $num('dur')) ? (int) $d : null);
+        $set('torik_mive', ($d ?? null) ? (string) ($_POST['dur_to'] ?? '') : null);
+        $set('eghet', $num('burn') ?: null);
+        $set('alvas_szorzo', $num('sleepmul') ?: null);
+        $set('marad', (string) ($_POST['leftover'] ?? ''));
+        $fx = trim((string) ($_POST['eat_fx'] ?? ''));
+        if ($fx !== '' && ($errors = Rules::validate($fx, Rules::EFFECTS, 'hatások'))) {
+            $this->fail(implode(' ', $errors));
+        }
+        $set('fogyasztas_hatas', $fx === '' ? null : json_decode($fx, true));
+        $set('gyujto', !empty($_POST['lighter']));
+        $set('jarmu', !empty($_POST['vehicle'])
+            ? ['sebesseg' => max(0.05, min(2, (float) ($_POST['speed'] ?? 0.5))), 'utak' => self::csv((string) ($_POST['roads'] ?? 'szabadter')) ?: ['szabadter']]
+            : null);
 
         return $props;
     }

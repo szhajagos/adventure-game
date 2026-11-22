@@ -63,6 +63,14 @@ final class ServerFactory
         - Kölcsönt a kolcsont_ker, visszafizetést a visszafizet eszköz intéz. A késést a motor bünteti.
         - Az „idojaras” mező az aktuális idő: sződ bele a leírásba (eső, köd, napsütés).
 
+        Eszközök, receptek, jármű, tűz:
+        - A hasznal eszközzel egy tárgy valamin használható (pl. üres üveg → kút). Ha a válasz szerint „nincs látható hatása”,
+          meséld el, hogy így nem működik; ne találj ki eredményt.
+        - A keszit recept szerint készít (az allapot válaszában a „receptek” mutatja, mit tud a játékos, és mi hiányzik még).
+        - Járműbe a beszall eszközzel, kiszállni a kiszall eszközzel lehet; járművel gyorsabb az út, de épületbe nem lehet vele menni.
+        - Tüzet a tuzet_rak eszköz rak (tűzrakóhelyen, gyújtóval, az ott lévő tüzelőből); a „mit” mezőben más éghető tárgyat is rá lehet tenni.
+        - A romló ételek és a kopó eszközök változását az „esemenyek” jelzik.
+
         Események és a játék vége:
         - Az „esemenyek” lista a játék szabályaiból jön: ezek megtörtént dolgok, mindig sződ bele őket a mesébe.
         - A „valtozasok” lista a tulajdonságok változása; ha jelentős, említsd meg.
@@ -107,7 +115,7 @@ final class ServerFactory
         $panel  = ['ui' => new UiToolMeta(resourceUri: $panelUri, visibility: [ToolVisibility::Model, ToolVisibility::App])];
 
         return Server::builder()
-            ->setServerInfo('MCP Adventure', '0.8.0')
+            ->setServerInfo('MCP Adventure', '0.9.0')
             ->setInstructions(self::INSTRUCTIONS)
             ->enableExtension(new McpApps())
             ->addResource(
@@ -381,6 +389,55 @@ final class ServerFactory
                     'szereplo' => ['string', 'A szereplő neve.'],
                     'osszeg'   => ['integer', 'Csak ha a játékos részletet akar fizetni.'],
                 ], ['szereplo']),
+            )
+            ->addTool(
+                fn (string $targy, ?string $min = null): array => $engine->useItem($playerId, $targy, $min),
+                name: 'hasznal',
+                meta: $panel,
+                title: 'Használ',
+                description: 'A játékos használ egy tárgyat, akár valamin (egy másik tárgyon vagy a helyszín egy részén, pl. kút). A hatást a játék szabályai adják.',
+                annotations: new ToolAnnotations(title: 'Használ', readOnlyHint: false, destructiveHint: false),
+                inputSchema: self::schema([
+                    'targy' => ['string', 'A használt tárgy (eszköz) neve.'],
+                    'min'   => ['string', 'Amin használja: egy tárgy neve vagy a helyszín egy része (pl. kút).'],
+                ], ['targy']),
+            )
+            ->addTool(
+                fn (string $recept): array => $engine->craft($playerId, $recept),
+                name: 'keszit',
+                meta: $panel,
+                title: 'Készít',
+                description: 'A játékos elkészít valamit egy ismert recept szerint: az alapanyagok elfogynak, az eszközök kopnak.',
+                annotations: new ToolAnnotations(title: 'Készít', readOnlyHint: false, destructiveHint: false),
+                inputSchema: self::schema(['recept' => ['string', 'A recept vagy az elkészítendő tárgy neve.']], ['recept']),
+            )
+            ->addTool(
+                fn (string $jarmu): array => $engine->board($playerId, $jarmu),
+                name: 'beszall',
+                meta: $panel,
+                title: 'Beszáll',
+                description: 'A játékos beszáll egy itt álló járműbe vagy felül rá (pl. bicikli). Utána a menj és a menj_ide vele együtt viszi.',
+                annotations: new ToolAnnotations(title: 'Beszáll', readOnlyHint: false, destructiveHint: false),
+                inputSchema: self::schema(['jarmu' => ['string', 'A jármű neve.']], ['jarmu']),
+            )
+            ->addTool(
+                fn (): array => $engine->alight($playerId),
+                name: 'kiszall',
+                meta: $panel,
+                title: 'Kiszáll',
+                description: 'A játékos kiszáll a járműből (leszáll róla); a jármű a helyszínen marad.',
+                annotations: new ToolAnnotations(title: 'Kiszáll', readOnlyHint: false, destructiveHint: false),
+                inputSchema: $noArgs,
+            )
+            ->addTool(
+                fn (?string $mit = null): array => $engine->makeFire($playerId, $mit),
+                name: 'tuzet_rak',
+                meta: $panel,
+                title: 'Tüzet rak',
+                description: 'A játékos tüzet rak egy tűzrakóhelyen (gyújtó kell, és az ott lévő tüzelő ég el), vagy megrakja az égő tüzet. '
+                    .'A „mit” mezőben egy konkrét éghető tárgyat is a tűzre tehet.',
+                annotations: new ToolAnnotations(title: 'Tüzet rak', readOnlyHint: false, destructiveHint: false),
+                inputSchema: self::schema(['mit' => ['string', 'Csak ha a játékos megnevezi, mit tesz a tűzre (pl. újság).']], []),
             )
             ->addTool(
                 fn (?int $ora = null): array => $engine->sleep($playerId, $ora),

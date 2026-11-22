@@ -139,6 +139,7 @@ final class GameEngine
             'tulajdonsagok' => $ctx->state->statsView(),
             'leltar'        => $ctx->world->inventoryTree(),
             'kapacitas'     => $this->capacityView($ctx),
+            'receptek'      => array_map(fn ($r) => $this->recipeView($ctx, $r), $this->knownRecipes($ctx)) ?: null,
         ], withLocation: false);
     }
 
@@ -176,10 +177,22 @@ final class GameEngine
             return ['siker' => false, 'esemeny' => $exit['blocked_message'] ?: 'Arra most nem tudsz továbbmenni.'];
         }
 
+        $vehicle = $this->vehicle($ctx);
+        if ($vehicle !== null) {
+            $vp = $ctx->world->props($vehicle['item_id'])['jarmu'] ?? [];
+            $roads = (array) ($vp['utak'] ?? ['szabadter']);
+            if (!array_intersect($roads, $ctx->featureMap[$exit['to_location']] ?? [])) {
+                return ['siker' => false, 'esemeny' => sprintf('A(z) %s nem mehet oda (%s). Előbb ki kell szállni.', $ctx->world->name($vehicle), $target['name'])];
+            }
+        }
         $rules = $this->rules($ctx);
 
-        return $rules->around($ctx, $event, function () use ($ctx, $exit, $dir, $rules) {
+        return $rules->around($ctx, $event, function () use ($ctx, $exit, $dir, $rules, $vehicle) {
             $minutes = (int) $exit['minutes'];
+            if ($vehicle !== null) {
+                $minutes = max(1, (int) ceil($minutes * (float) (($ctx->world->props($vehicle['item_id'])['jarmu'] ?? [])['sebesseg'] ?? 0.5)));
+                $ctx->world->move($vehicle, (int) $vehicle['quantity'], 'location', $exit['to_location']);
+            }
             $firstVisit = !$ctx->state->visited($exit['to_location']);
             $ctx->passTime($minutes);
             $ctx->location = $exit['to_location'];
@@ -291,8 +304,8 @@ final class GameEngine
 
             return [
                 'siker'   => true,
-                'esemeny' => sprintf('A játékos elsétált ide: %s (%s), az út %d percig tartott. Az útvonal ismerős, elég röviden elmesélni.',
-                    $known[$goal], implode(' → ', $route), $minutes),
+                'esemeny' => sprintf('A játékos %s ide: %s (%s), az út %d percig tartott. Az útvonal ismerős, elég röviden elmesélni.',
+                    $ctx->state->extra('jarmu') !== null ? 'eljutott (járművel)' : 'elsétált', $known[$goal], implode(' → ', $route), $minutes),
             ];
         });
     }
@@ -495,8 +508,13 @@ final class GameEngine
                 if ($stat !== '' && $ctx->state->hasStat($stat)) {
                     $ctx->addStat($stat, (int) $type['nutrition'] * ((int) ($eat['irany'] ?? -1) >= 0 ? 1 : -1));
                 }
+                $props = $ctx->world->props($inst['item_id']);
                 $ctx->world->decrease($inst, 1);
                 $ctx->passTime(self::MINUTES['fogyaszt']);
+                if (!empty($props['marad']) && $ctx->world->type((string) $props['marad']) !== null) {
+                    $this->giveToPlayer($ctx, (string) $props['marad'], 1); // pl. az üres üveg megmarad
+                }
+                Rules::apply((array) ($props['fogyasztas_hatas'] ?? []), $ctx, ['muvelet' => 'fogyaszt', 'targy' => $inst['item_id']]);
 
                 return ['siker' => true, 'esemeny' => sprintf('A játékos elfogyasztotta: %s.', $type['name'])];
             });
@@ -773,6 +791,316 @@ final class GameEngine
         $stmt->execute([$gameId]);
 
         return $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+    }
+
+    // =====================================================================
+    //  Haladó tárgyak: használat, receptek, jármű, tűz, kopás
+    // =====================================================================
+
+    /** Egy használat kopást okoz; ha a tartósság elfogy, a tárgy eltörik (vagy átalakul). */
+    private function wearOut(Context $ctx, int $instId): void
+    {
+        $inst = $ctx->world->get($instId);
+        $p = $inst ? $ctx->world->props($inst['item_id']) : [];
+        if (!$inst || empty($p['tartossag'])) {
+            return;
+        }
+        $wear = (int) $inst['wear'] + 1;
+        if ($wear < (int) $p['tartossag']) {
+            $ctx->world->setWear($inst, $wear);
+            return;
+        }
+        $name = $ctx->world->name($inst);
+        $to = (string) ($p['torik_mive'] ?? '');
+        if ($to !== '' && $ctx->world->type($to) !== null) {
+            if ((int) $inst['quantity'] > 1) {
+                $ctx->world->decrease($inst, 1);
+                $ctx->world->create($to, 1, $inst['place_type'], $inst['place_id'], $ctx->minute);
+            } else {
+                $ctx->world->transform($inst, $to, $ctx->minute);
+            }
+            $ctx->messages[] = sprintf('A(z) %s elhasználódott: %s lett belőle.', $name, $ctx->world->type($to)['name']);
+        } else {
+            $ctx->world->decrease($inst, 1);
+            $ctx->messages[] = sprintf('A(z) %s elhasználódott, nincs belőle több.', $name);
+        }
+    }
+
+    /** Új tárgy a játékosnak; ha nem fér el, a földre kerül. @return string hova került */
+    private function giveToPlayer(Context $ctx, string $itemId, int $qty): string
+    {
+        $w = $ctx->world;
+        $id = $w->create($itemId, $qty, 'location', $ctx->location, $ctx->minute);
+        [$type, $place] = $w->autoPlace($w->get($id), $qty);
+        if ($type === null) {
+            return 'a földre (nem fért el a játékosnál)';
+        }
+        $id = $w->move($w->get($id), $qty, $type, $place);
+
+        return $w->whereLabel($w->get($id));
+    }
+
+    /** Eszköz használata valamin (egy tárgyon vagy a helyszín egy részén); a hatást a játék szabályai adják. */
+    public function useItem(int $playerId, string $item, ?string $target = null): array
+    {
+        return $this->run($playerId, 'hasznal', function (Context $ctx) use ($item, $target) {
+            $w = $ctx->world;
+            $reach = array_merge($w->carried(), $w->atLocationDeep($ctx->location));
+            [$tool, $alts] = $w->findByName($item, $reach);
+            if ($tool === null) {
+                return $this->notFound($item, $alts, 'elerheto');
+            }
+            $celpont = null;
+            $targetName = null;
+            if ($target !== null && trim($target) !== '') {
+                [$tInst] = $w->findByName($target, array_filter($reach, fn ($i) => (int) $i['id'] !== (int) $tool['id']));
+                if ($tInst !== null) {
+                    $celpont = $tInst['item_id'];
+                    $targetName = $w->name($tInst);
+                } else {
+                    $q = World::simplify($target);
+                    foreach ($ctx->features() as $f) {
+                        $fs = World::simplify(str_replace('_', ' ', $f));
+                        if ($q !== '' && ($fs === $q || str_contains($q, $fs) || str_contains($fs, $q))) {
+                            $celpont = $f;
+                            $targetName = $target;
+                        }
+                    }
+                }
+                if ($celpont === null) {
+                    return ['siker' => false, 'esemeny' => sprintf('„%s”: ilyen nincs a közelben.', $target), 'felszereltseg' => $ctx->features()];
+                }
+            }
+            $rules = $this->rules($ctx);
+            $event = ['muvelet' => 'hasznal', 'targy' => $tool['item_id'], 'celpont' => $celpont];
+
+            return $rules->around($ctx, $event, function () use ($ctx, $rules, $tool, $targetName) {
+                $ctx->passTime(5);
+                if ($rules->lastMatched === 0) {
+                    return ['siker' => false, 'esemeny' => sprintf('A játékos kipróbálta: %s%s – de így nincs látható hatása.',
+                        $ctx->world->name($tool), $targetName ? ' → '.$targetName : '')];
+                }
+                $this->wearOut($ctx, (int) $tool['id']);
+
+                return ['siker' => true, 'esemeny' => sprintf('A játékos használta: %s%s.', $ctx->world->name($tool), $targetName ? ' → '.$targetName : '')];
+            });
+        });
+    }
+
+    /** @return list<array> a játék receptjei (JSON-mezők dekódolva) */
+    private function recipes(string $gameId): array
+    {
+        $stmt = $this->db->prepare('SELECT * FROM recipes WHERE game_id = ? ORDER BY sort_order, name');
+        $stmt->execute([$gameId]);
+
+        return array_map(function (array $r) {
+            foreach (['ingredients', 'tools', 'features', 'conditions', 'effects'] as $k) {
+                $r[$k] = json_decode((string) $r[$k], true) ?: [];
+            }
+            return $r;
+        }, $stmt->fetchAll());
+    }
+
+    /** Mi hiányzik egy recepthez most? @return list<string> */
+    private function recipeMissing(Context $ctx, array $r): array
+    {
+        $w = $ctx->world;
+        $missing = [];
+        foreach ($r['ingredients'] as $ing) {
+            $have = $w->countCarried((string) $ing['targy']) + $w->countAt($ctx->location, (string) $ing['targy']);
+            if ($have < (int) ($ing['darab'] ?? 1)) {
+                $missing[] = sprintf('%s ×%d', $w->type((string) $ing['targy'])['name'] ?? $ing['targy'], (int) ($ing['darab'] ?? 1));
+            }
+        }
+        foreach ($r['tools'] as $t) {
+            if ($w->countCarried((string) $t) === 0) {
+                $missing[] = sprintf('eszköz: %s', $w->type((string) $t)['name'] ?? $t);
+            }
+        }
+        foreach ($r['features'] as $f) {
+            if (!in_array($f, $ctx->features(), true)) {
+                $missing[] = $f === 'tuz' ? 'egy égő tűz' : 'hely: '.$f;
+            }
+        }
+
+        return $missing;
+    }
+
+    private function recipeView(Context $ctx, array $r): array
+    {
+        $w = $ctx->world;
+        $missing = $this->recipeMissing($ctx, $r);
+
+        return array_filter([
+            'recept'   => $r['name'],
+            'eredmeny' => sprintf('%s ×%d', $w->type($r['result_item'])['name'] ?? $r['result_item'], (int) $r['result_qty']),
+            'kell'     => implode(', ', array_merge(
+                array_map(fn ($i) => sprintf('%s ×%d', $w->type((string) $i['targy'])['name'] ?? $i['targy'], (int) ($i['darab'] ?? 1)), $r['ingredients']),
+                array_map(fn ($t) => 'eszköz: '.($w->type((string) $t)['name'] ?? $t), $r['tools']),
+                array_map(fn ($f) => $f === 'tuz' ? 'égő tűz' : 'hely: '.$f, $r['features']))),
+            'hianyzik' => $missing ? implode(', ', $missing) : null,
+        ], fn ($v) => $v !== null);
+    }
+
+    /** @return list<array> a játékos által ismert receptek (amelyeknek a feltétele teljesül) */
+    private function knownRecipes(Context $ctx): array
+    {
+        return array_values(array_filter($this->recipes($ctx->gameId()), fn ($r) => Rules::check($r['conditions'], $ctx)));
+    }
+
+    /** Készítés recept szerint: az alapanyagok elfogynak, az eszközök kopnak, az eredmény a játékoshoz kerül. */
+    public function craft(int $playerId, string $recipe): array
+    {
+        return $this->run($playerId, 'keszit', function (Context $ctx) use ($recipe) {
+            $known = $this->knownRecipes($ctx);
+            if (!$known) {
+                return ['siker' => false, 'esemeny' => 'A játékos most nem tud semmit elkészíteni.'];
+            }
+            $q = World::simplify($recipe);
+            $hit = null;
+            foreach ($known as $r) {
+                $n = World::simplify($r['name']);
+                $res = World::simplify($ctx->world->type($r['result_item'])['name'] ?? '');
+                if ($q !== '' && ($n === $q || $res === $q || str_contains($n, $q) || str_contains($q, $n) || str_contains($res, $q))) {
+                    $hit = $r;
+                    break;
+                }
+            }
+            if ($hit === null) {
+                return ['siker' => false, 'esemeny' => sprintf('Ilyet a játékos nem tud készíteni: „%s”.', $recipe),
+                    'receptek' => array_map(fn ($r) => $this->recipeView($ctx, $r), $known)];
+            }
+            if ($missing = $this->recipeMissing($ctx, $hit)) {
+                return ['siker' => false, 'esemeny' => sprintf('„%s”: még hiányzik: %s.', $hit['name'], implode(', ', $missing))];
+            }
+            $event = ['muvelet' => 'keszit', 'targy' => $hit['result_item']];
+
+            return $this->rules($ctx)->around($ctx, $event, function () use ($ctx, $hit) {
+                $w = $ctx->world;
+                foreach ($hit['ingredients'] as $ing) {
+                    Rules::apply([['targy_elvesz' => [(string) $ing['targy'], (int) ($ing['darab'] ?? 1)]]], $ctx);
+                }
+                foreach ($hit['tools'] as $t) {
+                    foreach ($w->carried() as $inst) {
+                        if ($inst['item_id'] === $t) {
+                            $this->wearOut($ctx, (int) $inst['id']);
+                            break;
+                        }
+                    }
+                }
+                $ctx->passTime((int) $hit['minutes']);
+                $where = $this->giveToPlayer($ctx, $hit['result_item'], max(1, (int) $hit['result_qty']));
+                Rules::apply($hit['effects'], $ctx, ['muvelet' => 'keszit', 'targy' => $hit['result_item']]);
+
+                return ['siker' => true, 'esemeny' => sprintf('A játékos elkészítette: %s ×%d (%d perc) → %s.%s',
+                    $w->type($hit['result_item'])['name'], (int) $hit['result_qty'], (int) $hit['minutes'], $where,
+                    $hit['description'] ? ' '.$hit['description'] : '')];
+            });
+        });
+    }
+
+    /** Beszállás egy itt álló járműbe (vagy felülés rá). */
+    public function board(int $playerId, string $vehicle): array
+    {
+        return $this->run($playerId, 'menj', function (Context $ctx) use ($vehicle) {
+            $w = $ctx->world;
+            if ($ctx->state->extra('jarmu') !== null) {
+                return ['siker' => false, 'esemeny' => 'A játékos már egy járműben ül.'];
+            }
+            [$inst, $alts] = $w->findByName($vehicle, array_filter($w->at('location', $ctx->location), fn ($i) => isset($w->props($i['item_id'])['jarmu'])));
+            if ($inst === null) {
+                return $alts ? $this->notFound($vehicle, $alts, 'itt') : ['siker' => false, 'esemeny' => 'Itt nincs jármű, amibe be lehetne szállni.'];
+            }
+            $ctx->state->setExtra('jarmu', (int) $inst['id']);
+            $ctx->passTime(1);
+
+            return ['siker' => true, 'esemeny' => sprintf('A játékos beszállt / felült: %s. A szabad ég alatti utakon gyorsabban halad vele.', $w->name($inst))];
+        });
+    }
+
+    public function alight(int $playerId): array
+    {
+        return $this->run($playerId, 'menj', function (Context $ctx) {
+            $id = $ctx->state->extra('jarmu');
+            if ($id === null) {
+                return ['siker' => false, 'esemeny' => 'A játékos nem ül járműben.'];
+            }
+            $ctx->state->setExtra('jarmu', null);
+            $ctx->passTime(1);
+            $v = $ctx->world->get((int) $id);
+
+            return ['siker' => true, 'esemeny' => sprintf('A játékos kiszállt / leszállt: %s. A jármű itt marad.', $v ? $ctx->world->name($v) : 'a járműről')];
+        });
+    }
+
+    /** A jármű, amiben a játékos ül (ha még megvan és vele van) */
+    private function vehicle(Context $ctx): ?array
+    {
+        $id = $ctx->state->extra('jarmu');
+        $v = $id !== null ? $ctx->world->get((int) $id) : null;
+        if ($id !== null && ($v === null || $v['place_type'] !== 'location' || $v['place_id'] !== $ctx->location)) {
+            $ctx->state->setExtra('jarmu', null); // a jármű eltűnt vagy máshol van
+            return null;
+        }
+
+        return $v;
+    }
+
+    /** Tűzrakás egy tűzrakóhelyen: az itt letett éghető dolgokból, egy gyújtóval. Ha már ég, táplálja. */
+    public function makeFire(int $playerId, ?string $fuelName = null): array
+    {
+        return $this->run($playerId, 'hasznal', function (Context $ctx) use ($fuelName) {
+            $w = $ctx->world;
+            if (!in_array('tuzrakohely', $ctx->featureMap[$ctx->location] ?? [], true)) {
+                return ['siker' => false, 'esemeny' => 'Itt nem lehet tüzet rakni (tűzrakóhely kellene).'];
+            }
+            $burning = $ctx->fireAt($ctx->location);
+            $lighter = null;
+            foreach ($w->carried() as $i) {
+                if (!empty($w->props($i['item_id'])['gyujto'])) {
+                    $lighter = $i;
+                    break;
+                }
+            }
+            if (!$burning && $lighter === null) {
+                return ['siker' => false, 'esemeny' => 'Nincs mivel meggyújtani (gyufa, öngyújtó kellene).'];
+            }
+            if (!$burning && in_array($ctx->state->weather(), ['esos', 'havas', 'viharos'], true) && in_array('szabadter', $ctx->featureMap[$ctx->location] ?? [], true)) {
+                return ['siker' => false, 'esemeny' => 'Ilyen időben a szabadban nem gyullad meg a tűz.'];
+            }
+            $burnable = fn ($i) => (float) ($w->props($i['item_id'])['eghet'] ?? 0) > 0;
+            if ($fuelName !== null && trim($fuelName) !== '') {
+                // a játékos megnevezte, mit tesz a tűzre (nála vagy itt)
+                [$one, $alts] = $w->findByName($fuelName, array_filter(array_merge($w->carried(), $w->at('location', $ctx->location)), $burnable));
+                if ($one === null) {
+                    return $alts ? $this->notFound($fuelName, $alts, 'elerheto') : ['siker' => false, 'esemeny' => sprintf('„%s”: ez nem ég, vagy nincs itt.', $fuelName)];
+                }
+                $fuel = [$one];
+            } else {
+                // magától csak a tüzelőt (pl. ágakat) teszi rá, ami itt van a földön – a papírt, takarót nem
+                $fuel = array_filter($w->at('location', $ctx->location), fn ($i) => $burnable($i) && in_array('tuzelo', $w->tags($i['item_id']), true));
+            }
+            if (!$fuel) {
+                return ['siker' => false, 'esemeny' => 'Nincs itt tüzelő (pl. ág). Más éghető dolgot (papírt) csak akkor tesz a tűzre, ha a játékos megnevezi.'];
+            }
+            $hours = 0.0;
+            $names = [];
+            foreach ($fuel as $i) {
+                $hours += (float) $w->props($i['item_id'])['eghet'] * (int) $i['quantity'];
+                $names[] = $w->name($i).((int) $i['quantity'] > 1 ? ' ×'.$i['quantity'] : '');
+                $w->decrease($i, (int) $i['quantity']);
+            }
+            if (!$burning) {
+                $this->wearOut($ctx, (int) $lighter['id']);
+            }
+            $fires = $ctx->state->extra('tuz') ?? [];
+            $fires[$ctx->location] = max($burning ?? $ctx->minute, $ctx->minute) + (int) round($hours * 60);
+            $ctx->state->setExtra('tuz', $fires);
+            $ctx->passTime(10);
+
+            return ['siker' => true, 'esemeny' => sprintf('%s A tűzre került: %s. Kb. %s-ig ég.',
+                $burning ? 'A játékos megrakta a tüzet.' : 'A játékos tüzet rakott.', implode(', ', $names), self::formatTime($fires[$ctx->location]))];
+        });
     }
 
     // =====================================================================
@@ -1100,7 +1428,11 @@ final class GameEngine
             }
             $hours = max(1, min(12, $hours ?? 8));
             $inBed = in_array('agy', $ctx->features(), true);
-            $rate = (float) $b['alvas_orankent'] * ($inBed ? 1 : (float) $b['alvas_agy_nelkul']);
+            $outside = (float) $b['alvas_agy_nelkul'];
+            foreach ($ctx->world->carried() as $i) {  // pl. takaró: ágy nélkül is jobb az alvás
+                $outside = max($outside, min(1.0, (float) ($ctx->world->props($i['item_id'])['alvas_szorzo'] ?? 0)));
+            }
+            $rate = (float) $b['alvas_orankent'] * ($inBed ? 1 : $outside);
 
             return $this->rules($ctx)->around($ctx, ['muvelet' => 'alszik'], function () use ($ctx, $hours, $hasStat, $stat, $max, $rate, $inBed) {
                 $slept = 0;
@@ -1625,6 +1957,8 @@ final class GameEngine
             'leiras'        => $loc['description'],
             'felszereltseg' => json_decode((string) ($loc['features'] ?? '[]'), true) ?: null,
             'nyitvatartas'  => $loc['open_hours'] ?: null,
+            'tuz'           => ($f = $ctx->fireAt($locationId)) ? 'ég egy tűz, kb. '.self::formatTime($f).'-ig' : null,
+            'jarmuben'      => ($v = $this->vehicle($ctx)) ? $ctx->world->name($v) : null,
             'kijaratok'     => $exits,
             'targyak'       => $ctx->world->locationTree($locationId),
             'szereplok'     => array_map(fn ($n) => ['nev' => $n['name'], 'leiras' => $n['description']], $ctx->npcs->present($ctx)) ?: null,
@@ -1676,6 +2010,8 @@ final class GameEngine
                 $loc['kijaratok']
             ),
             'retegek'       => $this->layersFor($ctx),
+            'tuz'           => $ctx->fireAt($ctx->location) !== null,
+            'jarmu'         => $loc['jarmuben'] ?? null,
             'vege'          => $ctx->state->end(),
             'zene'          => null, // később: a játék hangulatzene-oldala
         ];
