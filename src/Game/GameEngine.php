@@ -181,7 +181,7 @@ final class GameEngine
         if ($vehicle !== null) {
             $vp = $ctx->world->props($vehicle['item_id'])['jarmu'] ?? [];
             $roads = (array) ($vp['utak'] ?? ['szabadter']);
-            if (!array_intersect($roads, $ctx->featureMap[$exit['to_location']] ?? [])) {
+            if (!array_intersect($roads, $ctx->featuresOf($exit['to_location']))) {
                 return ['siker' => false, 'esemeny' => sprintf('A(z) %s nem mehet oda (%s). Előbb ki kell szállni.', $ctx->world->name($vehicle), $target['name'])];
             }
         }
@@ -1141,7 +1141,7 @@ final class GameEngine
     {
         return $this->run($playerId, 'hasznal', function (Context $ctx) use ($fuelName) {
             $w = $ctx->world;
-            if (!in_array('tuzrakohely', $ctx->featureMap[$ctx->location] ?? [], true)) {
+            if (!in_array('tuzrakohely', $ctx->featuresOf($ctx->location), true)) {
                 return ['siker' => false, 'esemeny' => 'Itt nem lehet tüzet rakni (tűzrakóhely kellene).'];
             }
             $burning = $ctx->fireAt($ctx->location);
@@ -1155,7 +1155,7 @@ final class GameEngine
             if (!$burning && $lighter === null) {
                 return ['siker' => false, 'esemeny' => 'Nincs mivel meggyújtani (gyufa, öngyújtó kellene).'];
             }
-            if (!$burning && in_array($ctx->state->weather(), ['esos', 'havas', 'viharos'], true) && in_array('szabadter', $ctx->featureMap[$ctx->location] ?? [], true)) {
+            if (!$burning && in_array($ctx->state->weather(), ['esos', 'havas', 'viharos'], true) && in_array('szabadter', $ctx->featuresOf($ctx->location), true)) {
                 return ['siker' => false, 'esemeny' => 'Ilyen időben a szabadban nem gyullad meg a tűz.'];
             }
             $burnable = fn ($i) => (float) ($w->props($i['item_id'])['eghet'] ?? 0) > 0;
@@ -1812,6 +1812,12 @@ final class GameEngine
         foreach ($stmt->fetchAll() as $l) {
             $ctx->featureMap[$l['id']] = json_decode((string) $l['features'], true) ?: [];
         }
+        $stmt = $this->db->prepare('SELECT * FROM location_states WHERE game_id = ?');
+        $stmt->execute([$game['id']]);
+        foreach ($stmt->fetchAll() as $st) {
+            $st['features'] = $st['features'] !== null ? (json_decode((string) $st['features'], true) ?: []) : null;
+            $ctx->locationStates[$st['location_id']][$st['state']] = $st;
+        }
 
         return $ctx;
     }
@@ -2022,6 +2028,11 @@ final class GameEngine
     {
         $gameId = $ctx->gameId();
         $loc = $this->locationRow($gameId, $locationId);
+        $stateId = $ctx->locationState($locationId);
+        if ($stateId !== null && ($st = $ctx->locationStates[$locationId][$stateId] ?? null)) {
+            $loc['name'] = $st['name'] ?: $loc['name'];
+            $loc['description'] = $st['description'];
+        }
 
         $stmt = $this->db->prepare(
             'SELECT e.direction, e.description, e.conditions, l.name AS target, l.open_hours
@@ -2045,7 +2056,8 @@ final class GameEngine
             'id'            => $loc['id'],
             'nev'           => $loc['name'],
             'leiras'        => $loc['description'],
-            'felszereltseg' => json_decode((string) ($loc['features'] ?? '[]'), true) ?: null,
+            'felszereltseg' => $ctx->featuresOf($locationId) ?: null,
+            'allapot'       => $stateId,
             'nyitvatartas'  => $loc['open_hours'] ?: null,
             'tuz'           => ($f = $ctx->fireAt($locationId)) ? 'ég egy tűz, kb. '.self::formatTime($f).'-ig' : null,
             'jarmuben'      => ($v = $this->vehicle($ctx)) ? $ctx->world->name($v) : null,
@@ -2184,6 +2196,22 @@ final class GameEngine
         $flag = $state?->flag('kep:'.$loc['id']);
         if (is_string($flag)) {
             $variants[] = $flag;
+        }
+        // A helyszín állapota (pl. leegett): leegett-esos-ejszaka → leegett-ejszaka → leegett-esos → leegett
+        $ls = $state !== null ? ((($state->extra('allapot') ?? [])[$loc['id']] ?? '') ?: null) : null;
+        if ($ls !== null) {
+            $part = $minute !== null ? Context::dayPartOf($minute) : null;
+            $w = $state->weather();
+            if ($w !== null && $part !== null) {
+                $variants[] = $ls.'-'.$w.'-'.$part;
+            }
+            if ($part !== null) {
+                $variants[] = $ls.'-'.$part;
+            }
+            if ($w !== null) {
+                $variants[] = $ls.'-'.$w;
+            }
+            $variants[] = (string) $ls;
         }
         // Sorrend: kombinált (esos-ejszaka) → napszak (ejszaka) → időjárás (esos) → alapkép.
         // A napszak előbb jön: éjjel egy esős nappali kép rosszabb, mint egy eső nélküli éjszakai.

@@ -67,6 +67,7 @@ final class Rules
         'megbizas'      => ['["megbízás_id", "folyamatban"]', 'egy megbízás állapota (felajanlva nincs; folyamatban, teljesitve, elbukott, elutasitva)'],
         'tartozik'      => ['"szereplő_id"', 'a játékosnak kölcsöntartozása van a szereplő felé'],
         'munka'         => ['"munka_id"', 'a dolgozik művelet munkája ez'],
+        'helyszin_allapot' => ['["helyszín_id", "állapot"]', 'a helyszín ebben az állapotban van ("" = az eredetiben)'],
         'reszlet'       => ['"részlet_id"', 'a megvizsgál művelet a helyszín ezen részletére (látnivalójára) irányul'],
         'celpont'       => ['"tárgy_id" vagy "felszereltség"', 'a használ művelet célpontja (egy tárgy vagy a helyszín felszereltsége, pl. ivokut)'],
         'jarmuben'      => ['"tárgy_id" vagy true', 'a játékos (ebben) a járműben ül'],
@@ -87,6 +88,7 @@ final class Rules
         'athelyez'            => ['"helyszín_id"', 'a játékos átkerül egy másik helyszínre'],
         'ido'                 => ['percek', 'ennyi idő telik el'],
         'ellenorzo_pont'      => ['"név"', 'ellenőrző pont: vereség után innen folytatható'],
+        'helyszin_allapot'    => ['["helyszín_id", "állapot"]', 'a helyszín tartósan megváltozik (új leírás, kép); "" = vissza az eredetire'],
         'idojaras_beallit'    => ['"esos"', 'az időjárás megváltozik'],
         'jatek_vege'          => ['{"tipus": "gyozelem" vagy "vereseg", "szoveg": "…"}', 'a játék véget ér'],
     ];
@@ -233,6 +235,7 @@ final class Rules
             'munka'         => ($event['munka'] ?? null) === $v,
             'celpont'       => ($event['celpont'] ?? null) === $v,
             'reszlet'       => ($event['reszlet'] ?? null) === $v,
+            'helyszin_allapot' => is_array($v) && isset($v[0]) && ($ctx->locationState((string) $v[0]) ?? '') === (string) ($v[1] ?? ''),
             'jarmuben'      => $v === true ? $st->extra('jarmu') !== null
                 : (($j = $st->extra('jarmu')) !== null && ($ctx->world->get((int) $j)['item_id'] ?? null) === $v),
             'veletlen'      => $st->random(1, 100) <= (int) $v,
@@ -377,6 +380,11 @@ final class Rules
                 break;
             case 'ellenorzo_pont':
                 $ctx->checkpoints[] = (string) $v;
+                break;
+            case 'helyszin_allapot':
+                if (is_array($v) && isset($v[0])) {
+                    $ctx->setLocationState((string) $v[0], isset($v[1]) ? (string) $v[1] : null);
+                }
                 break;
             case 'idojaras_beallit':
                 $st->setWeather((string) $v);

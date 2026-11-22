@@ -408,6 +408,8 @@ final class AdminApp
             .$exitForm
             .'<h2>Tárgyak a helyszínen (a játék elején)</h2>'.($trows ? '<table><tr><th>Tárgy</th><th>Darab</th><th></th></tr>'.$trows.'</table>' : '<p class="muted">Nincs itt tárgy.</p>')
             .$itemForm
+            .'<h2>Állapotok (tartós változás)</h2>'.$this->statesBlock($gid, $lid)
+            .'<h2>Képváltozatok</h2>'.$this->variantsBlock($gid, $lid, array_column($this->statesOf($gid, $lid), 'state'))
             .'<h2>Részletek (látnivalók)</h2><p class="muted">A helyszínhez rögzített dolgok, amelyeket meg lehet vizsgálni, saját szöveggel és közelképpel.</p>'.$this->detailsBlock($gid, $lid)
             .'<h2>Munka ezen a helyszínen</h2>'.$this->jobsBlock($gid, $lid)
             .'<h2>Kereskedés a helyszínen (automata, bolt szereplő nélkül)</h2>'.$this->tradesBlock($gid, 'location', $lid)
@@ -759,7 +761,27 @@ final class AdminApp
 
             case 'upload_img':
                 $this->requireLocation($gid, $lid);
-                $this->uploadImage($gid, $lid);
+                $variant = trim((string) ($_POST['variant'] ?? ''));
+                if ($variant !== '' && !preg_match(self::VARIANT_PATTERN, $variant)) {
+                    $this->fail('A változat neve kisbetű, szám, aláhúzás, kötőjellel tagolva (pl. leegett-ejszaka).');
+                }
+                $this->uploadImage($gid, $lid, $variant);
+
+            case 'delete_variant':
+                $this->requireLocation($gid, $lid);
+                $variant = (string) ($_POST['variant'] ?? '');
+                if (preg_match(self::VARIANT_PATTERN, $variant)) {
+                    $this->removeImages($gid, $lid.'~'.$variant);
+                }
+                $this->ok('A képváltozat törölve.', ['p' => 'loc', 'g' => $gid, 'l' => $lid]);
+
+            case 'save_state':
+                $this->saveState($gid, $lid);
+
+            case 'delete_state':
+                $this->requireLocation($gid, $lid);
+                $this->db->prepare('DELETE FROM location_states WHERE game_id = ? AND location_id = ? AND state = ?')->execute([$gid, $lid, (string) ($_POST['s'] ?? '')]);
+                $this->ok('Az állapot törölve.', ['p' => 'loc', 'g' => $gid, 'l' => $lid]);
 
             case 'delete_img':
                 $this->requireLocation($gid, $lid);
@@ -837,8 +859,9 @@ final class AdminApp
         $this->ok('A játék adatai mentve.', ['p' => 'game', 'g' => $id]);
     }
 
-    private function uploadImage(string $gid, string $lid): never
+    private function uploadImage(string $gid, string $lid, string $variant = ''): never
     {
+        $name = $variant === '' ? $lid : $lid.'~'.$variant;
         $f = $_FILES['image'] ?? null;
         if (!$f || ($f['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
             $this->fail('A feltöltés nem sikerült (lehet, hogy túl nagy a fájl).');
@@ -861,8 +884,8 @@ final class AdminApp
         if (!is_dir($dir) && !mkdir($dir, 0755, true)) {
             $this->fail('A képmappa nem hozható létre (jogosultság?).');
         }
-        $this->removeImages($gid, $lid);
-        $target = $dir.'/'.$lid.'.'.$ext;
+        $this->removeImages($gid, $name);
+        $target = $dir.'/'.$name.'.'.$ext;
         if (!move_uploaded_file($f['tmp_name'], $target)) {
             $this->fail('A kép mentése nem sikerült (jogosultság?).');
         }
@@ -978,7 +1001,7 @@ final class AdminApp
         $out = "-- MCP Adventure – a(z) „{$game['title']}” játék exportja\n-- Készült: ".date('Y-m-d H:i:s')."\n"
             ."-- Betöltés: phpMyAdmin → Importálás. Ha a játék már létezik, előbb töröld (lásd lent).\nSET NAMES utf8mb4;\n\n"
             ."-- DELETE FROM location_items WHERE game_id = ".$q($gid)."; DELETE FROM exits WHERE game_id = ".$q($gid).";\n"
-            ."-- DELETE FROM location_details WHERE game_id = ".$q($gid)."; DELETE FROM recipes WHERE game_id = ".$q($gid)."; DELETE FROM quests WHERE game_id = ".$q($gid)."; DELETE FROM jobs WHERE game_id = ".$q($gid).";\n"
+            ."-- DELETE FROM location_states WHERE game_id = ".$q($gid)."; DELETE FROM location_details WHERE game_id = ".$q($gid)."; DELETE FROM recipes WHERE game_id = ".$q($gid)."; DELETE FROM quests WHERE game_id = ".$q($gid)."; DELETE FROM jobs WHERE game_id = ".$q($gid).";\n"
             ."-- DELETE FROM trades WHERE game_id = ".$q($gid)."; DELETE FROM npc_topics WHERE game_id = ".$q($gid)."; DELETE FROM npcs WHERE game_id = ".$q($gid).";\n"
             ."-- DELETE FROM rules WHERE game_id = ".$q($gid)."; DELETE FROM game_stats WHERE game_id = ".$q($gid)."; DELETE FROM items WHERE game_id = ".$q($gid)."; DELETE FROM locations WHERE game_id = ".$q($gid)."; DELETE FROM games WHERE id = ".$q($gid).";\n\n";
 
@@ -992,6 +1015,7 @@ final class AdminApp
             'npcs'           => ['SELECT * FROM npcs WHERE game_id = ? ORDER BY sort_order, id', []],
             'npc_topics'     => ['SELECT game_id, npc_id, title, keywords, content, conditions, effects, sort_order FROM npc_topics WHERE game_id = ? ORDER BY npc_id, sort_order, id', []],
             'trades'         => ['SELECT game_id, trader_type, trader_id, mode, item_id, price, price_item_id, daily_limit, conditions, sort_order FROM trades WHERE game_id = ? ORDER BY id', []],
+            'location_states' => ['SELECT * FROM location_states WHERE game_id = ? ORDER BY location_id, state', []],
             'location_details' => ['SELECT * FROM location_details WHERE game_id = ? ORDER BY location_id, sort_order, id', []],
             'recipes'        => ['SELECT * FROM recipes WHERE game_id = ? ORDER BY id', []],
             'quests'         => ['SELECT * FROM quests WHERE game_id = ? ORDER BY sort_order, id', []],
@@ -1333,6 +1357,102 @@ JS;
         $this->db->prepare('UPDATE locations SET layers = ? WHERE game_id = ? AND id = ?')
             ->execute([json_encode($out ?: new \stdClass()), $gid, $lid]);
         $this->ok('A rétegek mentve.', ['p' => 'loc', 'g' => $gid, 'l' => $lid]);
+    }
+
+    // =====================================================================
+    //  Helyszínállapotok és képváltozatok
+    // =====================================================================
+
+    private const VARIANT_PATTERN = '/^[a-z0-9_]+(-[a-z0-9_]+){0,2}$/';
+
+    /** @return array<string, string> változat => URL (a <helyszín>~<változat>.* fájlok) */
+    private function imageVariants(string $gid, string $lid): array
+    {
+        $out = [];
+        foreach (glob($this->imageDir.'/'.$gid.'/'.$lid.'~*') ?: [] as $file) {
+            if (preg_match('/~([a-z0-9_-]+)\.(webp|jpe?g|png)$/', basename($file), $m)) {
+                $out[$m[1]] ??= $this->imageUrl.'/'.rawurlencode($gid).'/'.rawurlencode(basename($file)).'?v='.filemtime($file);
+            }
+        }
+        ksort($out);
+
+        return $out;
+    }
+
+    private function statesBlock(string $gid, string $lid): string
+    {
+        $stmt = $this->db->prepare('SELECT * FROM location_states WHERE game_id = ? AND location_id = ? ORDER BY state');
+        $stmt->execute([$gid, $lid]);
+        $states = $stmt->fetchAll();
+        $rows = '';
+        foreach ($states as $st) {
+            $rows .= '<tr><td class="mono"><b>'.View::e($st['state']).'</b></td><td>'.View::e((string) $st['name']).'</td>'
+                .'<td>'.View::e(mb_strimwidth($st['description'], 0, 160, '…')).'</td><td class="mono">'.View::e($st['features'] === null ? '(marad)' : implode(', ', json_decode($st['features'], true) ?: [])).'</td>'
+                .'<td>'.View::postButton('Törlés', ['a' => 'delete_state', 'g' => $gid, 'l' => $lid, 's' => $st['state']], 'Törlöd az állapotot?', 'btn danger small').'</td></tr>';
+        }
+
+        return '<p class="muted">Ha a helyszín a játék során tartósan megváltozik (leég, megjavítják), egy szabály átállítja: '
+            .'<span class="mono">{"helyszin_allapot": ["'.View::e($lid).'", "leegett"]}</span>; vissza: <span class="mono">["'.View::e($lid).'", ""]</span>. '
+            .'Az állapot saját leírást, nevet, felszereltséget és képet kaphat; a tárgyak, szereplők és részletek megmaradnak.</p>'
+            .($rows ? '<table><tr><th>Állapot</th><th>Név</th><th>Leírás</th><th>Felszereltség</th><th></th></tr>'.$rows.'</table><br>' : '')
+            .'<form method="post" class="card">'.View::csrf().'<input type="hidden" name="a" value="save_state"><input type="hidden" name="g" value="'.View::e($gid).'"><input type="hidden" name="l" value="'.View::e($lid).'">'
+            .'<div class="row">'.View::field('Állapot azonosítója (pl. leegett, javitva)', 's', '', 'text', ['required' => true, 'pattern' => '[a-z0-9_]{1,50}'])
+            .View::field('Név ebben az állapotban (üres = marad)', 'name', '', 'text', ['maxlength' => 150]).'</div>'
+            .View::field('Leírás ebben az állapotban', 'description', '', 'textarea', ['rows' => 3, 'required' => true])
+            .View::field('Felszereltség ebben az állapotban (vesszővel; üres = marad a mostani)', 'features', '', 'text')
+            .'<p class="muted" style="font-size:13px">Ugyanazzal az azonosítóval újra mentve az állapot felülíródik. Képe a lenti „Képváltozatok” részben tölthető fel, az állapot nevével (pl. <span class="mono">leegett</span>, <span class="mono">leegett-ejszaka</span>).</p>'
+            .'<button class="btn">Állapot mentése</button></form>';
+    }
+
+    private function variantsBlock(string $gid, string $lid, array $states): string
+    {
+        $cells = '';
+        foreach ($this->imageVariants($gid, $lid) as $v => $url) {
+            $cells .= '<div style="display:inline-block;margin:0 10px 12px 0;text-align:center;vertical-align:top">'
+                .'<img src="'.View::e($url).'" alt="" style="width:180px;border-radius:6px;display:block"><span class="mono">~'.View::e($v).'</span><br>'
+                .View::postButton('Törlés', ['a' => 'delete_variant', 'g' => $gid, 'l' => $lid, 'variant' => $v], 'Törlöd ezt a képváltozatot?', 'btn danger small').'</div>';
+        }
+        $parts = ['hajnal', 'nappal', 'este', 'ejszaka'];
+        $suggest = array_merge($parts, array_keys(Context::WEATHER), array_map(fn ($w) => $w.'-ejszaka', array_keys(Context::WEATHER)));
+        foreach ($states as $st) {
+            $suggest[] = $st;
+            foreach (['ejszaka', 'esos', 'esos-ejszaka'] as $x) {
+                $suggest[] = $st.'-'.$x;
+            }
+        }
+
+        return '<p class="muted">A szerver a legjobban illő képet választja: állapot (pl. <span class="mono">leegett-ejszaka</span>, <span class="mono">leegett</span>) → '
+            .'időjárás és napszak együtt (<span class="mono">esos-ejszaka</span>) → napszak (<span class="mono">ejszaka</span>) → időjárás (<span class="mono">esos</span>) → alapkép. Ami hiányzik, azt átugorja.</p>'
+            .($cells ? '<div>'.$cells.'</div>' : '<p class="muted">Még nincs képváltozat.</p>')
+            .'<form method="post" enctype="multipart/form-data" class="card">'.View::csrf().'<input type="hidden" name="a" value="upload_img">'
+            .'<input type="hidden" name="g" value="'.View::e($gid).'"><input type="hidden" name="l" value="'.View::e($lid).'">'
+            .'<div class="row">'.View::field('Változat neve', 'variant', '', 'text', ['required' => true, 'list' => 'variantlist', 'pattern' => '[a-z0-9_]+(-[a-z0-9_]+){0,2}', 'placeholder' => 'ejszaka'])
+            .'<label>Kép<br><input type="file" name="image" accept=".webp,.jpg,.jpeg,.png" required></label></div>'
+            .'<datalist id="variantlist">'.implode('', array_map(fn ($v) => '<option value="'.View::e($v).'">', array_unique($suggest))).'</datalist>'
+            .'<button class="btn">Változat feltöltése</button></form>';
+    }
+
+    private function statesOf(string $gid, string $lid): array
+    {
+        $stmt = $this->db->prepare('SELECT state FROM location_states WHERE game_id = ? AND location_id = ?');
+        $stmt->execute([$gid, $lid]);
+
+        return $stmt->fetchAll();
+    }
+
+    private function saveState(string $gid, string $lid): never
+    {
+        $this->requireLocation($gid, $lid);
+        $sid = (string) ($_POST['s'] ?? '');
+        $this->validId($sid, 'állapot');
+        $desc = trim((string) ($_POST['description'] ?? ''));
+        if ($desc === '') {
+            $this->fail('A leírás kötelező.');
+        }
+        $f = trim((string) ($_POST['features'] ?? ''));
+        $this->db->prepare('REPLACE INTO location_states (game_id, location_id, state, name, description, features) VALUES (?, ?, ?, ?, ?, ?)')
+            ->execute([$gid, $lid, $sid, trim((string) ($_POST['name'] ?? '')) ?: null, $desc, $f === '' ? null : json_encode(self::csv($f))]);
+        $this->ok('Az állapot mentve.', ['p' => 'loc', 'g' => $gid, 'l' => $lid]);
     }
 
     // =====================================================================

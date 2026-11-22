@@ -24,6 +24,8 @@ final class Context
     public int $notable = 0;
     /** @var array<string, list<string>> helyszín => felszereltség */
     public array $featureMap = [];
+    /** @var array<string, array<string, array>> helyszín => állapot => adatai (név, leírás, felszereltség) */
+    public array $locationStates = [];
     /** A szabálymotor: az óránkénti és az éjféli szabályokhoz kell */
     public ?Rules $rules = null;
     /** A szereplők (a „jelen_van” feltételhez és a kereskedéshez) */
@@ -118,12 +120,40 @@ final class Context
     /** @return list<string> az aktuális helyszín felszereltsége */
     public function features(): array
     {
-        $f = $this->featureMap[$this->location] ?? [];
+        $f = $this->featuresOf($this->location);
         if ($this->fireAt($this->location)) {
             $f[] = 'tuz'; // ég itt egy tűz
         }
 
         return $f;
+    }
+
+    /** A helyszín aktuális állapota (pl. leegett), vagy null, ha az eredeti */
+    public function locationState(string $location): ?string
+    {
+        $s = ($this->state->extra('allapot') ?? [])[$location] ?? null;
+
+        return $s !== null && $s !== '' ? (string) $s : null;
+    }
+
+    public function setLocationState(string $location, ?string $state): void
+    {
+        $all = $this->state->extra('allapot') ?? [];
+        if ($state === null || $state === '') {
+            unset($all[$location]);
+        } else {
+            $all[$location] = $state;
+        }
+        $this->state->setExtra('allapot', $all ?: null);
+    }
+
+    /** A helyszín felszereltsége, az állapotát is figyelembe véve */
+    public function featuresOf(string $location): array
+    {
+        $st = $this->locationState($location);
+        $over = $st !== null ? ($this->locationStates[$location][$st]['features'] ?? null) : null;
+
+        return is_array($over) ? $over : ($this->featureMap[$location] ?? []);
     }
 
     /** Ég-e tűz a helyszínen (meddig), a mentés szerint */
@@ -202,7 +232,7 @@ final class Context
             return;
         }
         foreach ($fires as $loc => $until) {
-            if ($until > $this->minute && in_array('szabadter', $this->featureMap[$loc] ?? [], true)) {
+            if ($until > $this->minute && in_array('szabadter', $this->featuresOf((string) $loc), true)) {
                 unset($fires[$loc]);
                 if ($loc === $this->location) {
                     $this->messages[] = 'Az időjárás eloltotta a tüzet.';

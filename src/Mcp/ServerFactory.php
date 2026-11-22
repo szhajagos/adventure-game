@@ -65,6 +65,8 @@ final class ServerFactory
         - A helyszín „munkak” listája mutatja, hol lehet dolgozni; a munkát a dolgozik eszköz végzi el (órákig tart).
         - Kölcsönt a kolcsont_ker, visszafizetést a visszafizet eszköz intéz. A késést a motor bünteti.
         - Az „idojaras” mező az aktuális idő: sződ bele a leírásba (eső, köd, napsütés).
+        - Ha a helyszínnek „allapot” mezője van (pl. leégett, vészüzem), a helyszín tartósan megváltozott: a leírása már
+          az új állapotot mutatja. Ha a játékos korábban már járt itt, érdemes kiemelni a változást.
 
         Eszközök, receptek, jármű, tűz:
         - A hasznal eszközzel egy tárgy valamin használható (pl. üres üveg → kút). Ha a válasz szerint „nincs látható hatása”,
@@ -118,7 +120,7 @@ final class ServerFactory
         $panel  = ['ui' => new UiToolMeta(resourceUri: $panelUri, visibility: [ToolVisibility::Model, ToolVisibility::App])];
 
         return Server::builder()
-            ->setServerInfo('MCP Adventure', '0.10.0')
+            ->setServerInfo('MCP Adventure', '0.11.0')
             ->setInstructions(self::INSTRUCTIONS)
             ->enableExtension(new McpApps())
             ->addResource(
