@@ -35,6 +35,7 @@ final class Rules
         'odaad'        => 'odaad egy tárgyat egy szereplőnek',
         'vesz'         => 'vásárol (a tárgy a megvett tárgy)',
         'elad'         => 'elad egy tárgyat',
+        'dolgozik'     => 'elvégez egy munkát (munka: a munka azonosítója)',
         'orankent'     => '– minden egész órában (az idő múlásával magától)',
         'ejfelkor'     => '– minden éjfélkor (a napi számlálók nullázása után)',
     ];
@@ -60,6 +61,10 @@ final class Rules
         'napszak'       => ['"ejszaka" vagy ["este", "ejszaka"]', 'napszak: hajnal (4–7), nappal (7–18), este (18–22), ejszaka (22–4)'],
         'ido_kozott'    => ['["06:00", "09:00"]', 'a játékbeli idő e két időpont között van (átnyúlhat éjfélen)'],
         'latogatott'    => ['"helyszín_id"', 'a játékos járt már ezen a helyszínen'],
+        'idojaras'      => ['"esos" vagy ["esos", "havas"]', 'az időjárás (derult, felhos, esos, havas, kodos, viharos)'],
+        'megbizas'      => ['["megbízás_id", "folyamatban"]', 'egy megbízás állapota (felajanlva nincs; folyamatban, teljesitve, elbukott, elutasitva)'],
+        'tartozik'      => ['"szereplő_id"', 'a játékosnak kölcsöntartozása van a szereplő felé'],
+        'munka'         => ['"munka_id"', 'a dolgozik művelet munkája ez'],
         'veletlen'      => ['szám (0–100)', 'ennyi százalék eséllyel teljesül'],
     ];
 
@@ -77,6 +82,7 @@ final class Rules
         'athelyez'            => ['"helyszín_id"', 'a játékos átkerül egy másik helyszínre'],
         'ido'                 => ['percek', 'ennyi idő telik el'],
         'ellenorzo_pont'      => ['"név"', 'ellenőrző pont: vereség után innen folytatható'],
+        'idojaras_beallit'    => ['"esos"', 'az időjárás megváltozik'],
         'jatek_vege'          => ['{"tipus": "gyozelem" vagy "vereseg", "szoveg": "…"}', 'a játék véget ér'],
     ];
 
@@ -212,7 +218,11 @@ final class Rules
             'napszak'       => in_array($ctx->dayPart(), (array) $v, true),
             'ido_kozott'    => is_array($v) && count($v) === 2 && self::between($ctx->timeOfDay(), (string) $v[0], (string) $v[1]),
             'latogatott'    => $st->visited((string) $v),
-            'veletlen'      => random_int(1, 100) <= (int) $v,
+            'idojaras'      => in_array($st->weather(), (array) $v, true),
+            'megbizas'      => is_array($v) && ($st->quest((string) $v[0])['allapot'] ?? null) === ($v[1] ?? 'folyamatban'),
+            'tartozik'      => $st->loan((string) $v) !== null,
+            'munka'         => ($event['munka'] ?? null) === $v,
+            'veletlen'      => $st->random(1, 100) <= (int) $v,
             default         => false,
         };
     }
@@ -349,6 +359,9 @@ final class Rules
                 break;
             case 'ellenorzo_pont':
                 $ctx->checkpoints[] = (string) $v;
+                break;
+            case 'idojaras_beallit':
+                $st->setWeather((string) $v);
                 break;
             case 'jatek_vege':
                 $type = is_array($v) ? ($v['tipus'] ?? 'gyozelem') : (string) $v;

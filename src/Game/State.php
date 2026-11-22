@@ -28,7 +28,7 @@ final class State
         $this->defs = array_column($statDefs, null, 'id');
         $data = json_decode($json ?: '{}', true);
         $this->data = is_array($data) ? $data : [];
-        foreach (['stats', 'flags', 'relations', 'counters'] as $k) {
+        foreach (['stats', 'flags', 'relations', 'counters', 'quests', 'loans'] as $k) {
             if (!isset($this->data[$k]) || !is_array($this->data[$k])) {
                 $this->data[$k] = [];
             }
@@ -61,6 +61,8 @@ final class State
         if ($out['relations'] === []) { $out['relations'] = new \stdClass(); }
         if ($out['counters'] === []) { $out['counters'] = new \stdClass(); }
         if ($out['stats'] === []) { $out['stats'] = new \stdClass(); }
+        if ($out['quests'] === []) { $out['quests'] = new \stdClass(); }
+        if ($out['loans'] === []) { $out['loans'] = new \stdClass(); }
 
         return json_encode($out, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
     }
@@ -229,6 +231,75 @@ final class State
         $v = $this->defs[$id]['min_value'] ?? null;
 
         return $v === null ? null : (float) $v;
+    }
+
+    // --- megbízások, kölcsönök, időjárás ----------------------------------------
+
+    /** @return array{allapot: string, hatarido?: ?int}|null */
+    public function quest(string $id): ?array
+    {
+        return $this->data['quests'][$id] ?? null;
+    }
+
+    public function setQuest(string $id, ?array $q): void
+    {
+        if ($q === null) {
+            unset($this->data['quests'][$id]);
+        } else {
+            $this->data['quests'][$id] = $q;
+        }
+    }
+
+    /** @return array<string, array> */
+    public function quests(): array
+    {
+        return $this->data['quests'];
+    }
+
+    /** @return array{tartozas: int, hatarido: int, kesett_napok?: int}|null */
+    public function loan(string $npc): ?array
+    {
+        return $this->data['loans'][$npc] ?? null;
+    }
+
+    public function setLoan(string $npc, ?array $loan): void
+    {
+        if ($loan === null) {
+            unset($this->data['loans'][$npc]);
+        } else {
+            $this->data['loans'][$npc] = $loan;
+        }
+    }
+
+    /** @return array<string, array> */
+    public function loans(): array
+    {
+        return $this->data['loans'];
+    }
+
+    public function weather(): ?string
+    {
+        return isset($this->data['idojaras']) ? (string) $this->data['idojaras'] : null;
+    }
+
+    public function setWeather(?string $w): void
+    {
+        $this->data['idojaras'] = $w;
+    }
+
+    /**
+     * Mentéshez kötött véletlen szám: a mag és a sorszám a mentésben van, így egy dobást
+     * nem lehet „újrakérni”, és egy hiba utólag visszakövethető.
+     */
+    public function random(int $min, int $max): int
+    {
+        if (!isset($this->data['rng']['mag'])) {
+            $this->data['rng'] = ['mag' => bin2hex(random_bytes(8)), 'n' => 0];
+        }
+        $n = ++$this->data['rng']['n'];
+        $x = hexdec(substr(hash('sha256', $this->data['rng']['mag'].':'.$n), 0, 12));
+
+        return $min + (int) ($x % ($max - $min + 1));
     }
 
     /** Egy előtagú számlálók nullázása (pl. „keszlet:” a reggeli készletpótláskor) */

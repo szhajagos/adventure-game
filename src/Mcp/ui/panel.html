@@ -59,6 +59,7 @@
   .chip small { color: var(--muted); font-size: 10px; margin-right: 4px; text-transform: uppercase; letter-spacing: .04em; }
   .chip em { color: var(--muted); font-style: normal; }
   .chip.ground { border-style: dashed; }
+  .chip.task { border-color: #e0b24a; }
   .chip.person { border-color: var(--acc, #8f86ff); }
   .exits { color: var(--muted); font-size: 12px; }
   .exits .locked { opacity: .55; }
@@ -99,6 +100,10 @@
       <span class="label">Leltár</span>
       <div class="chips" id="inv"></div>
       <button class="music" id="music" hidden>♪ Hangulatzene</button>
+    </div>
+    <div class="row" id="taskRow" hidden>
+      <span class="label">Feladat</span>
+      <div class="chips" id="tasks"></div>
     </div>
     <div class="row" id="hereRow" hidden>
       <span class="label">Itt</span>
@@ -211,7 +216,9 @@
     document.querySelector('.scene').hidden = !!p.kompakt;
     $('game').textContent = p.kompakt ? (p.jatek || 'MCP Adventure') + ' · ' + (p.helyszin || '') : (p.jatek || 'MCP Adventure');
     const parts = { hajnal: '🌅 hajnal', nappal: '☀ nappal', este: '🌇 este', ejszaka: '🌙 éjszaka' };
-    $('time').textContent = (p.ido || '') + (p.napszak ? ' · ' + (parts[p.napszak] || p.napszak) : '');
+    const sky = { derult: '☀ derült', felhos: '☁ felhős', esos: '🌧 esős', havas: '❄ havas', kodos: '🌫 ködös', viharos: '⛈ viharos' };
+    $('time').textContent = (p.ido || '') + (p.napszak ? ' · ' + (parts[p.napszak] || p.napszak) : '')
+      + (p.idojaras ? ' · ' + (sky[p.idojaras] || p.idojaras) : '');
     $('place').textContent = p.helyszin || '';
 
     const img = $('img');
@@ -244,6 +251,13 @@
       }
       inv.append(s);
     }
+
+    const tasks = $('tasks'); tasks.replaceChildren();
+    for (const t of p.feladatok || []) {
+      const s = document.createElement('span'); s.className = 'chip task';
+      s.textContent = t.cim + (t.hatarido ? ' ⏳ ' + t.hatarido : ''); tasks.append(s);
+    }
+    $('taskRow').hidden = !(p.feladatok || []).length;
 
     const here = $('here'); here.replaceChildren();
     for (const n of p.szereplok || []) {

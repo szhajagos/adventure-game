@@ -741,8 +741,16 @@ final class GameEngine
             'temak'        => $this->topicList($ctx, $topics),
             'kinalat'      => array_values(array_map(fn ($l) => $ctx->npcs->tradeView($l, $ctx->world, $ctx, $names),
                 array_filter($ctx->npcs->tradesHere($ctx), fn ($l) => $l['trader_type'] === 'npc' && $l['trader_id'] === $npc['id']))) ?: null,
+            'ajanlatok'    => array_map(fn ($q) => ['id' => $q['id'], 'cim' => $q['title'], 'amit_mond' => $q['offer_text'], 'cel' => $q['goal_text'],
+                'hatarido' => $q['deadline_minutes'] !== null ? sprintf('%d óra', intdiv((int) $q['deadline_minutes'], 60)) : null], $this->offers($ctx, $npc['id'])) ?: null,
+            'kolcson'      => ($l = json_decode((string) ($npc['loan'] ?? ''), true)) && !empty($l['osszeg'])
+                ? sprintf('ad kölcsönt: %d, %d%% kamattal, %d napra (a feltételei: %s)', $l['osszeg'], $l['kamat'] ?? 0, $l['napok'] ?? 3,
+                    Rules::check((array) ($l['feltetelek'] ?? []), $ctx) ? 'teljesülnek' : 'még nem teljesülnek')
+                : null,
+            'tartozas'     => ($t = $ctx->state->loan($npc['id'])) ? sprintf('%d, határidő: %s', $t['tartozas'], self::formatTime((int) $t['hatarido'])) : null,
             'utmutatas'    => 'Beszélj a szereplő nevében, a személyisége és a mai kedve szerint. Csak a témáiban szereplő tényeket mondhatja el; '
-                .'ha a játékos egy témáról kérdez, hívd a beszel eszközt a téma nevével.',
+                .'ha a játékos egy témáról kérdez, hívd a beszel eszközt a téma nevével. Ha van „ajanlatok”, a szereplő a saját szavaival ajánlja fel; '
+                .'a játékos döntése után hívd az elfogad vagy az elutasit eszközt.',
         ], fn ($v) => $v !== null && $v !== '');
     }
 
@@ -765,6 +773,301 @@ final class GameEngine
         $stmt->execute([$gameId]);
 
         return $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+    }
+
+    // =====================================================================
+    //  Megbízások, kölcsönök, munka
+    // =====================================================================
+
+    /** @return list<array> a játék megbízásai (JSON-mezők dekódolva) */
+    private function questDefs(string $gameId): array
+    {
+        if (!isset($this->questCache[$gameId])) {
+            $stmt = $this->db->prepare('SELECT * FROM quests WHERE game_id = ? ORDER BY sort_order, id');
+            $stmt->execute([$gameId]);
+            $this->questCache[$gameId] = array_map(function (array $q) {
+                foreach (['offer_conditions', 'accept_effects', 'goal_conditions', 'reward_effects', 'penalty_effects'] as $k) {
+                    $q[$k] = json_decode((string) $q[$k], true) ?: [];
+                }
+                return $q;
+            }, $stmt->fetchAll());
+        }
+
+        return $this->questCache[$gameId];
+    }
+
+    /** @var array<string, list<array>> */
+    private array $questCache = [];
+
+    /** @return list<array> amit a szereplő most felajánl */
+    private function offers(Context $ctx, string $npcId): array
+    {
+        return array_values(array_filter($this->questDefs($ctx->gameId()), function (array $q) use ($ctx, $npcId) {
+            $st = $ctx->state->quest($q['id'])['allapot'] ?? null;
+            $open = $st === null || ($q['repeatable'] && in_array($st, ['elutasitva', 'elbukott'], true));
+
+            return $q['npc_id'] === $npcId && $open && Rules::check($q['offer_conditions'], $ctx, ['muvelet' => 'beszel', 'szereplo' => $npcId]);
+        }));
+    }
+
+    private function questView(Context $ctx, array $q): array
+    {
+        $s = $ctx->state->quest($q['id']) ?? [];
+
+        return array_filter([
+            'id'       => $q['id'],
+            'cim'      => $q['title'],
+            'cel'      => $q['goal_text'],
+            'allapot'  => $s['allapot'] ?? 'felajanlva',
+            'hatarido' => isset($s['hatarido']) ? self::formatTime((int) $s['hatarido'])
+                : ($q['deadline_minutes'] !== null && !$s ? sprintf('az elfogadástól %d óra', intdiv((int) $q['deadline_minutes'], 60)) : null),
+        ], fn ($v) => $v !== null);
+    }
+
+    /** A futó megbízások ellenőrzése minden lépés után: teljesült-e a cél, vagy lejárt-e a határidő. */
+    private function checkQuests(Context $ctx): void
+    {
+        foreach ($this->questDefs($ctx->gameId()) as $q) {
+            $s = $ctx->state->quest($q['id']);
+            if (($s['allapot'] ?? null) !== 'folyamatban') {
+                continue;
+            }
+            if ($q['goal_conditions'] && Rules::check($q['goal_conditions'], $ctx)) {
+                $ctx->state->setQuest($q['id'], ['allapot' => 'teljesitve']);
+                Rules::apply($q['reward_effects'], $ctx);
+                $ctx->messages[] = sprintf('Megbízás teljesítve: „%s”. %s', $q['title'], (string) $q['success_text']);
+                $ctx->notable++;
+            } elseif (isset($s['hatarido']) && $ctx->minute > (int) $s['hatarido']) {
+                $ctx->state->setQuest($q['id'], ['allapot' => 'elbukott']);
+                Rules::apply($q['penalty_effects'], $ctx);
+                $ctx->messages[] = sprintf('Lejárt a határidő, a megbízás elbukott: „%s”. %s', $q['title'], (string) $q['fail_text']);
+                $ctx->notable++;
+            }
+        }
+    }
+
+    /** A játékos megbízásai és tartozásai */
+    public function questLog(int $playerId): array
+    {
+        return $this->run($playerId, 'status', function (Context $ctx) {
+            $active = [];
+            $done = [];
+            foreach ($this->questDefs($ctx->gameId()) as $q) {
+                $st = $ctx->state->quest($q['id'])['allapot'] ?? null;
+                if ($st === 'folyamatban') {
+                    $active[] = $this->questView($ctx, $q);
+                } elseif (in_array($st, ['teljesitve', 'elbukott'], true)) {
+                    $done[] = ['cim' => $q['title'], 'allapot' => $st];
+                }
+            }
+
+            return [
+                'siker'       => true,
+                'folyamatban' => $active,
+                'lezart'      => $done,
+                'tartozasok'  => $this->loansView($ctx),
+            ];
+        }, withLocation: false);
+    }
+
+    /** Egy felajánlott megbízás elfogadása (a felajánló szereplőnek jelen kell lennie). */
+    public function acceptQuest(int $playerId, string $quest, bool $accept = true): array
+    {
+        return $this->run($playerId, 'beszel', function (Context $ctx) use ($quest, $accept) {
+            $offers = [];
+            foreach ($ctx->npcs->present($ctx) as $npc) {
+                array_push($offers, ...$this->offers($ctx, $npc['id']));
+            }
+            $q = World::simplify($quest);
+            $hit = null;
+            foreach ($offers as $o) {
+                if (World::simplify($o['id']) === $q || World::simplify($o['title']) === $q || ($q !== '' && str_contains(World::simplify($o['title']), $q))) {
+                    $hit = $o;
+                    break;
+                }
+            }
+            if ($hit === null && count($offers) === 1 && $q === '') {
+                $hit = $offers[0];
+            }
+            if ($hit === null) {
+                return ['siker' => false, 'esemeny' => $offers ? 'Nincs ilyen felajánlott megbízás.' : 'Itt most senki nem ajánl megbízást.',
+                    'ajanlatok' => array_map(fn ($o) => $o['title'], $offers)];
+            }
+            if (!$accept) {
+                $ctx->state->setQuest($hit['id'], ['allapot' => 'elutasitva']);
+                $ctx->passTime(1);
+
+                return ['siker' => true, 'esemeny' => sprintf('A játékos visszautasította: „%s”.%s', $hit['title'],
+                    $hit['repeatable'] ? ' Később még elvállalhatja.' : ' Ez a lehetőség elveszett.')];
+            }
+            $ctx->state->setQuest($hit['id'], ['allapot' => 'folyamatban',
+                'hatarido' => $hit['deadline_minutes'] !== null ? $ctx->minute + (int) $hit['deadline_minutes'] : null]);
+            Rules::apply($hit['accept_effects'], $ctx);
+            $ctx->passTime(2);
+
+            return ['siker' => true, 'esemeny' => sprintf('A játékos elvállalta: „%s”.', $hit['title']), 'megbizas' => $this->questView($ctx, $hit)];
+        });
+    }
+
+    private function loansView(Context $ctx): array
+    {
+        $out = [];
+        foreach ($ctx->state->loans() as $npc => $l) {
+            $out[] = array_filter([
+                'kinek'        => $l['nev'] ?? $npc,
+                'tartozas'     => trim($l['tartozas'].' '.$this->moneyUnit($ctx)),
+                'hatarido'     => self::formatTime((int) $l['hatarido']),
+                'lejart'       => $ctx->minute > (int) $l['hatarido'] ? true : null,
+            ], fn ($v) => $v !== null);
+        }
+
+        return $out;
+    }
+
+    /** Kölcsönkérés egy jelen lévő szereplőtől (ha ad kölcsönt, és a feltételei teljesülnek). */
+    public function borrow(int $playerId, string $npc): array
+    {
+        return $this->run($playerId, 'beszel', function (Context $ctx) use ($npc) {
+            [$who, $alts] = $ctx->npcs->find($npc, $ctx->npcs->present($ctx));
+            if ($who === null) {
+                return $this->npcNotFound($npc, $alts);
+            }
+            $cfg = json_decode((string) ($who['loan'] ?? ''), true);
+            $money = $ctx->state->moneyStat();
+            if (!is_array($cfg) || empty($cfg['osszeg']) || $money === null) {
+                return ['siker' => false, 'esemeny' => sprintf('%s nem ad kölcsönt.', $who['name'])];
+            }
+            if ($ctx->state->loan($who['id']) !== null) {
+                return ['siker' => false, 'esemeny' => 'Előbb a régi tartozást kellene megadni.', 'tartozasok' => $this->loansView($ctx)];
+            }
+            if (!Rules::check((array) ($cfg['feltetelek'] ?? []), $ctx, ['muvelet' => 'beszel', 'szereplo' => $who['id']])) {
+                return ['siker' => false, 'esemeny' => sprintf('%s még nem bízik annyira a játékosban, hogy kölcsönt adjon.', $who['name'])];
+            }
+            $sum = (int) $cfg['osszeg'];
+            $due = (int) ceil($sum * (1 + (int) ($cfg['kamat'] ?? 0) / 100));
+            $ctx->addStat($money, $sum);
+            $ctx->state->setLoan($who['id'], ['nev' => $who['name'], 'tartozas' => $due,
+                'hatarido' => $ctx->minute + max(1, (int) ($cfg['napok'] ?? 3)) * 1440, 'kesedelmi_kamat' => (int) ($cfg['kesedelmi_kamat'] ?? 10)]);
+            $ctx->passTime(5);
+
+            return ['siker' => true, 'esemeny' => sprintf('%s kölcsönadott %d-t. Vissza kell fizetni: %d, határidő: %s. Késés esetén naponta késedelmi kamat jár, és romlik a viszony.',
+                $who['name'], $sum, $due, self::formatTime($ctx->minute - 5 + max(1, (int) ($cfg['napok'] ?? 3)) * 1440))];
+        });
+    }
+
+    /** Tartozás visszafizetése (részben is lehet). */
+    public function repay(int $playerId, string $npc, ?int $amount = null): array
+    {
+        return $this->run($playerId, 'beszel', function (Context $ctx) use ($npc, $amount) {
+            [$who, $alts] = $ctx->npcs->find($npc, $ctx->npcs->present($ctx));
+            if ($who === null) {
+                return $this->npcNotFound($npc, $alts);
+            }
+            $loan = $ctx->state->loan($who['id']);
+            if ($loan === null) {
+                return ['siker' => false, 'esemeny' => sprintf('A játékosnak nincs tartozása %s felé.', $who['name'])];
+            }
+            $money = (string) $ctx->state->moneyStat();
+            $have = (int) floor($ctx->state->stat($money));
+            $pay = min($amount ?? (int) $loan['tartozas'], (int) $loan['tartozas'], $have);
+            if ($pay <= 0) {
+                return ['siker' => false, 'esemeny' => 'Nincs nála pénz, amiből fizethetne.'];
+            }
+            $ctx->addStat($money, -$pay);
+            $loan['tartozas'] -= $pay;
+            $ctx->passTime(2);
+            if ($loan['tartozas'] <= 0) {
+                $ctx->state->setLoan($who['id'], null);
+                $late = ($loan['kesett_napok'] ?? 0) > 0;
+                if (!$late) {
+                    $ctx->state->addRelation($who['id'], 2);
+                }
+
+                return ['siker' => true, 'esemeny' => sprintf('A játékos kifizette a teljes tartozását %s felé.%s', $who['name'],
+                    $late ? ' (Késve, ezt nem felejti el.)' : ' Időben fizetett, ez javította a viszonyukat.')];
+            }
+            $ctx->state->setLoan($who['id'], $loan);
+
+            return ['siker' => true, 'esemeny' => sprintf('A játékos törlesztett %d-t; még %d a tartozás.', $pay, $loan['tartozas'])];
+        });
+    }
+
+    /** @return list<array> az itteni munkák */
+    private function jobsHere(Context $ctx): array
+    {
+        $stmt = $this->db->prepare('SELECT * FROM jobs WHERE game_id = ? AND location_id = ? ORDER BY sort_order, id');
+        $stmt->execute([$ctx->gameId(), $ctx->location]);
+
+        return $stmt->fetchAll();
+    }
+
+    private function jobView(Context $ctx, array $j): array
+    {
+        $why = $this->jobBlocker($ctx, $j);
+
+        return array_filter([
+            'id'        => $j['id'],
+            'munka'     => $j['title'],
+            'leiras'    => $j['description'],
+            'ido'       => sprintf('%d óra', intdiv((int) $j['minutes'], 60)).((int) $j['minutes'] % 60 ? sprintf(' %d perc', (int) $j['minutes'] % 60) : ''),
+            'fizetes'   => trim($j['pay'].' '.$this->moneyUnit($ctx)),
+            'most'      => $why === null ? 'vállalható' : $why,
+        ], fn ($v) => $v !== null && $v !== '');
+    }
+
+    private function jobBlocker(Context $ctx, array $j): ?string
+    {
+        if ($j['npc_id'] !== null && $ctx->npcs->whereIs($j['npc_id'], $ctx) !== $ctx->location) {
+            return 'most nincs itt, aki munkát adna';
+        }
+        if ($ctx->state->counter('napi_munka:'.$j['id']) >= (int) $j['daily_limit']) {
+            return 'mára már elvégezte';
+        }
+        if (!Rules::check(json_decode((string) $j['conditions'], true) ?: [], $ctx, ['muvelet' => 'dolgozik', 'munka' => $j['id']])) {
+            return 'most nem vállalható (időpont, ápoltság vagy erőnlét miatt)';
+        }
+
+        return null;
+    }
+
+    /** Munka: időért pénz. Munka nélkül megadva az itteni lehetőségeket sorolja fel. */
+    public function work(int $playerId, ?string $job = null): array
+    {
+        return $this->run($playerId, 'dolgozik', function (Context $ctx) use ($job) {
+            $jobs = $this->jobsHere($ctx);
+            if (!$jobs) {
+                return ['siker' => false, 'esemeny' => 'Itt nincs munkalehetőség.'];
+            }
+            $q = World::simplify((string) $job);
+            $hit = count($jobs) === 1 ? $jobs[0] : null;
+            foreach ($jobs as $j) {
+                if ($q !== '' && (World::simplify($j['id']) === $q || str_contains(World::simplify($j['title']), $q))) {
+                    $hit = $j;
+                }
+            }
+            if ($hit === null) {
+                return ['siker' => false, 'esemeny' => 'Melyik munkát vállalja?', 'munkak' => array_map(fn ($j) => $this->jobView($ctx, $j), $jobs)];
+            }
+            if (($why = $this->jobBlocker($ctx, $hit)) !== null) {
+                $cond = json_decode((string) $hit['conditions'], true) ?: [];
+                return ['siker' => false, 'esemeny' => sprintf('„%s”: %s.', $hit['title'], $why), 'feltetelek' => $cond];
+            }
+
+            return $this->rules($ctx)->around($ctx, ['muvelet' => 'dolgozik', 'munka' => $hit['id']], function () use ($ctx, $hit) {
+                $ctx->passTime((int) $hit['minutes']);
+                if ($ctx->state->end() !== null) {
+                    return ['siker' => true, 'esemeny' => 'A munka közben a játékos összeesett.'];
+                }
+                if (($money = $ctx->state->moneyStat()) !== null) {
+                    $ctx->addStat($money, (int) $hit['pay']);
+                }
+                Rules::apply(json_decode((string) $hit['effects'], true) ?: [], $ctx, ['muvelet' => 'dolgozik', 'munka' => $hit['id']]);
+                $ctx->state->increment('napi_munka:'.$hit['id']);
+
+                return ['siker' => true, 'esemeny' => sprintf('A játékos végigdolgozta: %s (%s). Megkapta a fizetését: %s.',
+                    $hit['title'], $this->jobView($ctx, $hit)['ido'], trim($hit['pay'].' '.$this->moneyUnit($ctx)))];
+            });
+        });
     }
 
     // =====================================================================
@@ -973,6 +1276,7 @@ final class GameEngine
     {
         $wasEnded = $ctx->state->end() !== null;
         if (!$wasEnded) {
+            $this->checkQuests($ctx);
             $this->checkEnd($ctx);
         }
         $this->persist($ctx);
@@ -994,6 +1298,9 @@ final class GameEngine
         }
         $result['ido'] = self::formatTime($ctx->minute);
         $result['napszak'] = self::DAY_PARTS[$ctx->dayPart()];
+        if (($w = $ctx->state->weather()) !== null) {
+            $result['idojaras'] = Context::WEATHER[$w] ?? $w;
+        }
 
         if (($end = $ctx->state->end()) !== null) {
             $result['vege'] = $end + [
@@ -1075,6 +1382,9 @@ final class GameEngine
         $ctx = new Context($playerId, $game, $settings, $state, $world, $save['location_id'], (int) $save['game_minute']);
         $ctx->rules = new Rules($this->db, $game['id']);
         $ctx->npcs = new Npcs($this->db, $game['id']);
+        if ($state->weather() === null && !empty($settings['idojaras'])) {
+            $ctx->rollWeather();
+        }
         $stmt = $this->db->prepare('SELECT id, features FROM locations WHERE game_id = ?');
         $stmt->execute([$game['id']]);
         foreach ($stmt->fetchAll() as $l) {
@@ -1318,6 +1628,7 @@ final class GameEngine
             'kijaratok'     => $exits,
             'targyak'       => $ctx->world->locationTree($locationId),
             'szereplok'     => array_map(fn ($n) => ['nev' => $n['name'], 'leiras' => $n['description']], $ctx->npcs->present($ctx)) ?: null,
+            'munkak'        => array_map(fn ($j) => $this->jobView($ctx, $j), $this->jobsHere($ctx)) ?: null,
             'kereskedes'    => array_map(fn ($l) => $ctx->npcs->tradeView($l, $ctx->world, $ctx, $this->locationNames($gameId)), $ctx->npcs->tradesHere($ctx)) ?: null,
             'kep'           => $this->imageFor($gameId, $loc, $ctx->state, $ctx->minute),
         ], fn ($v) => $v !== null);
@@ -1351,6 +1662,11 @@ final class GameEngine
             'kep'           => $loc['kep'] ?? null,
             'ido'           => self::formatTime($ctx->minute),
             'napszak'       => $ctx->dayPart(),
+            'idojaras'      => $ctx->state->weather(),
+            'feladatok'     => array_values(array_merge(
+                array_map(fn ($q) => ['cim' => $q['title'], 'hatarido' => isset(($ctx->state->quest($q['id']) ?? [])['hatarido']) ? self::formatTime((int) $ctx->state->quest($q['id'])['hatarido']) : null],
+                    array_filter($this->questDefs($ctx->gameId()), fn ($q) => ($ctx->state->quest($q['id'])['allapot'] ?? null) === 'folyamatban')),
+                array_map(fn ($l) => ['cim' => 'Tartozás: '.$l['kinek'].' ('.$l['tartozas'].')', 'hatarido' => $l['hatarido']], $this->loansView($ctx)))),
             'tulajdonsagok' => $ctx->state->statsView(),
             'leltar'        => $ctx->world->inventoryTree(),
             'szereplok'     => array_map(fn ($n) => $n['nev'], $loc['szereplok'] ?? []),
@@ -1440,6 +1756,10 @@ final class GameEngine
         $flag = $state?->flag('kep:'.$loc['id']);
         if (is_string($flag)) {
             $variants[] = $flag;
+        }
+        if ($minute !== null && $state?->weather() !== null) {
+            $variants[] = $state->weather().'-'.Context::dayPartOf($minute); // pl. park_pad~esos-ejszaka.webp
+            $variants[] = (string) $state->weather();                         // pl. park_pad~esos.webp
         }
         if ($minute !== null) {
             $variants[] = Context::dayPartOf($minute); // pl. park_pad~ejszaka.webp

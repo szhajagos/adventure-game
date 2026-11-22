@@ -67,6 +67,13 @@ final class Context
                 $left -= $step;
                 $this->record($this->state->passTime($step));
                 if ($this->minute % 60 === 0) {
+                    $every = max(1, (int) ($this->settings['idojaras_valtozas_ora'] ?? 3));
+                    if (intdiv($this->minute, 60) % $every === 0) {
+                        $this->rollWeather();
+                    }
+                    if ($this->minute % 1440 === 0) {
+                        $this->midnight();
+                    }
                     if ($this->minute % 1440 === 60 * (int) ($this->settings['keszletpotlas_ora'] ?? 6)) {
                         $this->state->resetPrefix('keszlet:'); // a kereskedők készlete reggel pótlódik
                     }
@@ -108,6 +115,69 @@ final class Context
     public function features(): array
     {
         return $this->featureMap[$this->location] ?? [];
+    }
+
+    // =====================================================================
+    //  Időjárás, éjféli elszámolás (kölcsönök, rendszeres költségek)
+    // =====================================================================
+
+    public const WEATHER = ['derult' => 'derült', 'felhos' => 'felhős', 'esos' => 'esős', 'havas' => 'havas', 'kodos' => 'ködös', 'viharos' => 'viharos'];
+
+    /** Új időjárás sorsolása a játék súlyai szerint (pl. derült 55, felhős 30, esős 15) */
+    public function rollWeather(): void
+    {
+        $weights = array_filter((array) ($this->settings['idojaras'] ?? []), fn ($w) => (int) $w > 0);
+        if (!$weights) {
+            return;
+        }
+        $before = $this->state->weather();
+        $roll = $this->state->random(1, (int) array_sum($weights));
+        foreach ($weights as $w => $p) {
+            $roll -= (int) $p;
+            if ($roll <= 0) {
+                $this->state->setWeather((string) $w);
+                if ($before !== null && $before !== $w) {
+                    $this->messages[] = sprintf('Megváltozott az időjárás: %s lett.', self::WEATHER[$w] ?? $w);
+                }
+                return;
+            }
+        }
+    }
+
+    /** Éjfélkor: a lejárt kölcsönök késedelmi kamata, és a rendszeres költségek */
+    private function midnight(): void
+    {
+        $money = $this->state->moneyStat();
+        foreach ($this->state->loans() as $npc => $loan) {
+            if ($this->minute > (int) $loan['hatarido']) {
+                $loan['tartozas'] = (int) ceil($loan['tartozas'] * (1 + (int) ($loan['kesedelmi_kamat'] ?? 10) / 100));
+                $loan['kesett_napok'] = (int) ($loan['kesett_napok'] ?? 0) + 1;
+                $this->state->setLoan((string) $npc, $loan);
+                $this->state->addRelation((string) $npc, -1);
+                $rep = (string) ($this->settings['reputacio'] ?? '');
+                if ($rep !== '' && $this->state->hasStat($rep)) {
+                    $this->addStat($rep, -1);
+                }
+                $this->messages[] = sprintf('Lejárt egy kölcsön (%s): a tartozás késedelmi kamattal %d lett, a hitelező egyre türelmetlenebb.',
+                    $loan['nev'] ?? $npc, $loan['tartozas']);
+            }
+        }
+
+        $day = intdiv($this->minute, 1440);
+        foreach ((array) ($this->settings['koltsegek'] ?? []) as $c) {
+            $every = max(1, (int) ($c['gyakorisag_nap'] ?? 1));
+            if (!is_array($c) || $day % $every !== 0 || !Rules::check((array) ($c['feltetelek'] ?? []), $this)) {
+                continue;
+            }
+            $sum = (int) ($c['osszeg'] ?? 0);
+            if ($money !== null && $this->state->stat($money) >= $sum) {
+                $this->addStat($money, -$sum);
+                $this->messages[] = sprintf('Levonták a rendszeres költséget: %s (%d).', $c['nev'] ?? 'költség', $sum);
+            } else {
+                Rules::apply((array) ($c['ha_nem_fizet'] ?? []), $this);
+                $this->messages[] = (string) ($c['uzenet_nem_fizet'] ?? sprintf('Nem volt pénz erre: %s.', $c['nev'] ?? 'költség'));
+            }
+        }
     }
 
     /** Napszak: hajnal (4–7), nappal (7–18), este (18–22), ejszaka (22–4) */

@@ -89,7 +89,7 @@ final class Npcs
             return (int) $m[2];
         }
         // a szélsőségek ritkábbak: 1 és 5 egy-egy, a többi két-két esély a nyolcból
-        $mood = [1, 2, 2, 3, 3, 4, 4, 5][random_int(0, 7)];
+        $mood = [1, 2, 2, 3, 3, 4, 4, 5][$ctx->state->random(0, 7)];
         $ctx->state->setFlag('_hangulat:'.$npcId, $day.':'.$mood);
 
         return $mood;

@@ -55,6 +55,14 @@ final class ServerFactory
         - Vásárlás: vesz, eladás: elad, ajándék vagy kért tárgy átadása: odaad. Az árakat és a készletet a „kereskedes”
           vagy a „kinalat” lista adja; alkudozni nem lehet, a szereplő kedve és a kapcsolat már benne van az árban.
 
+        Megbízások, munka, kölcsön:
+        - Ha a beszel válaszában „ajanlatok” van, a szereplő a saját szavaival ajánlja fel. Ha a játékos elvállalja,
+          hívd az elfogad eszközt, ha nem, az elutasit eszközt. A cél teljesülését és a határidőt a motor figyeli:
+          ha az „esemenyek” között megjelenik a teljesítés vagy a kudarc, meséld el.
+        - A helyszín „munkak” listája mutatja, hol lehet dolgozni; a munkát a dolgozik eszköz végzi el (órákig tart).
+        - Kölcsönt a kolcsont_ker, visszafizetést a visszafizet eszköz intéz. A késést a motor bünteti.
+        - Az „idojaras” mező az aktuális idő: sződ bele a leírásba (eső, köd, napsütés).
+
         Események és a játék vége:
         - Az „esemenyek” lista a játék szabályaiból jön: ezek megtörtént dolgok, mindig sződ bele őket a mesébe.
         - A „valtozasok” lista a tulajdonságok változása; ha jelentős, említsd meg.
@@ -99,7 +107,7 @@ final class ServerFactory
         $panel  = ['ui' => new UiToolMeta(resourceUri: $panelUri, visibility: [ToolVisibility::Model, ToolVisibility::App])];
 
         return Server::builder()
-            ->setServerInfo('MCP Adventure', '0.7.0')
+            ->setServerInfo('MCP Adventure', '0.8.0')
             ->setInstructions(self::INSTRUCTIONS)
             ->enableExtension(new McpApps())
             ->addResource(
@@ -316,6 +324,63 @@ final class ServerFactory
                     'darab' => ['integer', 'Hány darabot (alapból mindet, amennyit ma átvesznek).'],
                     'kinek' => ['string', 'Csak ha több felvásárló is van itt: kinek.'],
                 ], ['targy']),
+            )
+            ->addTool(
+                fn (): array => $engine->questLog($playerId),
+                name: 'megbizasok',
+                meta: $panel,
+                title: 'Megbízások',
+                description: 'A játékos futó és lezárt megbízásai, határidőkkel, és a kölcsöntartozásai.',
+                annotations: new ToolAnnotations(title: 'Megbízások', readOnlyHint: true),
+                inputSchema: $noArgs,
+            )
+            ->addTool(
+                fn (string $megbizas): array => $engine->acceptQuest($playerId, $megbizas, true),
+                name: 'elfogad',
+                meta: $panel,
+                title: 'Megbízás elfogadása',
+                description: 'A játékos elvállal egy megbízást, amelyet egy jelen lévő szereplő felajánlott (a beszel válaszának „ajanlatok” listájából).',
+                annotations: new ToolAnnotations(title: 'Megbízás elfogadása', readOnlyHint: false, destructiveHint: false),
+                inputSchema: self::schema(['megbizas' => ['string', 'A megbízás címe vagy azonosítója.']], ['megbizas']),
+            )
+            ->addTool(
+                fn (string $megbizas): array => $engine->acceptQuest($playerId, $megbizas, false),
+                name: 'elutasit',
+                meta: $panel,
+                title: 'Megbízás elutasítása',
+                description: 'A játékos visszautasít egy felajánlott megbízást. Van, amelyik később újra felajánlható, van, amelyik elvész.',
+                annotations: new ToolAnnotations(title: 'Megbízás elutasítása', readOnlyHint: false, destructiveHint: false),
+                inputSchema: self::schema(['megbizas' => ['string', 'A megbízás címe vagy azonosítója.']], ['megbizas']),
+            )
+            ->addTool(
+                fn (?string $munka = null): array => $engine->work($playerId, $munka),
+                name: 'dolgozik',
+                meta: $panel,
+                title: 'Dolgozik',
+                description: 'A játékos elvégez egy munkát ezen a helyszínen (a helyszín „munkak” listájából): órákig tart, pénzt hoz, fáraszt.',
+                annotations: new ToolAnnotations(title: 'Dolgozik', readOnlyHint: false, destructiveHint: false),
+                inputSchema: self::schema(['munka' => ['string', 'A munka neve; ha itt csak egy van, elhagyható.']], []),
+            )
+            ->addTool(
+                fn (string $szereplo): array => $engine->borrow($playerId, $szereplo),
+                name: 'kolcsont_ker',
+                meta: $panel,
+                title: 'Kölcsönt kér',
+                description: 'A játékos kölcsönt kér egy jelen lévő szereplőtől (ha az ad kölcsönt). Határidőre kamattal kell visszafizetni.',
+                annotations: new ToolAnnotations(title: 'Kölcsönt kér', readOnlyHint: false, destructiveHint: false),
+                inputSchema: self::schema(['szereplo' => ['string', 'A szereplő neve.']], ['szereplo']),
+            )
+            ->addTool(
+                fn (string $szereplo, ?int $osszeg = null): array => $engine->repay($playerId, $szereplo, $osszeg),
+                name: 'visszafizet',
+                meta: $panel,
+                title: 'Visszafizet',
+                description: 'A játékos törleszti a tartozását egy jelen lévő szereplőnek (alapból a teljes összeget, amennyire a pénze futja).',
+                annotations: new ToolAnnotations(title: 'Visszafizet', readOnlyHint: false, destructiveHint: false),
+                inputSchema: self::schema([
+                    'szereplo' => ['string', 'A szereplő neve.'],
+                    'osszeg'   => ['integer', 'Csak ha a játékos részletet akar fizetni.'],
+                ], ['szereplo']),
             )
             ->addTool(
                 fn (?int $ora = null): array => $engine->sleep($playerId, $ora),
