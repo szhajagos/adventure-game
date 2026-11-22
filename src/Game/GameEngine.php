@@ -1359,9 +1359,70 @@ final class GameEngine
                 fn (array $e) => ['irany' => Direction::label($e['irany']), 'celpont' => $e['celpont'], 'akadaly' => !empty($e['akadaly'])],
                 $loc['kijaratok']
             ),
+            'retegek'       => $this->layersFor($ctx),
             'vege'          => $ctx->state->end(),
             'zene'          => null, // később: a játék hangulatzene-oldala
         ];
+    }
+
+    /**
+     * A helyszínképre rajzolandó rétegek: a földön heverő tárgyak és a jelen lévő szereplők képei.
+     * Csak az kerül rá, aminek van képe ÉS a helyszínen megadott helye; a többi egyszerűen kimarad.
+     *
+     * @return list<array{kep: string, x: float, y: float, w: float}>
+     */
+    private function layersFor(Context $ctx): array
+    {
+        $loc = $this->locationRow($ctx->gameId(), $ctx->location);
+        $pos = json_decode((string) ($loc['layers'] ?? '{}'), true);
+        if (!is_array($pos) || $pos === []) {
+            return [];
+        }
+        $out = [];
+        $add = function (string $key, string $sub, string $id, int $copies) use ($ctx, $pos, &$out): void {
+            $p = $pos[$key] ?? null;
+            if (!is_array($p) || !isset($p['x'], $p['y'], $p['w'])) {
+                return;
+            }
+            $url = $this->spriteUrl($ctx->gameId(), $sub, $id);
+            if ($url === null) {
+                return;
+            }
+            for ($i = 0; $i < min(3, max(1, $copies)); $i++) {  // több darabból legfeljebb hármat rajzol, kicsit eltolva
+                $out[] = ['kep' => $url, 'x' => round((float) $p['x'] + $i * (float) $p['w'] * 0.55, 2), 'y' => (float) $p['y'], 'w' => (float) $p['w']];
+            }
+        };
+        foreach ($ctx->world->at('location', $ctx->location) as $inst) {
+            $add($inst['item_id'], 'targyak', $inst['item_id'], (int) $inst['quantity']);
+        }
+        foreach ($ctx->npcs?->present($ctx) ?? [] as $npc) {
+            $add('@'.$npc['id'], 'szereplok', $npc['id'], 1);
+        }
+        usort($out, fn ($a, $b) => $a['y'] <=> $b['y']); // ami lejjebb van, az kerül előre
+
+        return $out;
+    }
+
+    /** @var array<string, ?string> */
+    private array $spriteCache = [];
+
+    private function spriteUrl(string $gameId, string $sub, string $id): ?string
+    {
+        $key = $gameId.'/'.$sub.'/'.$id;
+        if (!array_key_exists($key, $this->spriteCache)) {
+            $this->spriteCache[$key] = null;
+            if ($this->imageDir !== null && $this->imageUrl !== null && preg_match('/^[a-z0-9_]+$/', $id)) {
+                foreach (['webp', 'png'] as $ext) {
+                    $file = $this->imageDir.'/'.$key.'.'.$ext;
+                    if (is_file($file)) {
+                        $this->spriteCache[$key] = $this->imageUrl.'/'.$key.'.'.$ext.'?v='.filemtime($file);
+                        break;
+                    }
+                }
+            }
+        }
+
+        return $this->spriteCache[$key];
     }
 
     /**

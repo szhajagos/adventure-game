@@ -318,7 +318,9 @@ final class AdminApp
             .'<input type="file" name="image" accept=".webp,.jpg,.jpeg,.png,image/webp,image/jpeg,image/png" required>'
             .'<button class="btn">'.($img ? 'Kép cseréje' : 'Kép feltöltése').'</button></form>'
             .'<p class="muted" style="font-size:13px">WebP, JPG vagy PNG, legfeljebb 5 MB. Ajánlott: 16:9 arány, WebP. A fájl neve automatikusan <span class="mono">'.View::e($lid).'</span> lesz.</p>'
-            .($img ? View::postButton('Kép törlése', ['a' => 'delete_img', 'g' => $gid, 'l' => $lid], 'Biztosan törlöd a képet?', 'btn danger small') : '');
+            .($img ? View::postButton('Kép törlése', ['a' => 'delete_img', 'g' => $gid, 'l' => $lid], 'Biztosan törlöd a képet?', 'btn danger small') : '')
+            ;
+        $layerBlock = $img ? $this->layersEditor($loc, $img) : '';
 
         // Kijáratok
         $locs = $this->locationsOf($gid);
@@ -391,6 +393,7 @@ final class AdminApp
             .'<datalist id="featlist">'.implode('', array_map(fn ($f) => '<option value="'.$f.'">', self::FEATURES)).'</datalist>'
             .'<button class="btn">Mentés</button></form>'
             .'</div><div class="card"><b>Kép</b><br><br>'.$imgBlock.'</div></div>'
+            .$layerBlock
             .'<h2>Kijáratok innen</h2>'.($erows ? '<table><tr><th>Irány</th><th>Hová</th><th>Leírás</th><th>Idő</th><th></th></tr>'.$erows.'</table><br>' : '<p class="muted">Még nincs kijárat.</p>')
             .$exitForm
             .'<h2>Tárgyak a helyszínen (a játék elején)</h2>'.($trows ? '<table><tr><th>Tárgy</th><th>Darab</th><th></th></tr>'.$trows.'</table>' : '<p class="muted">Nincs itt tárgy.</p>')
@@ -440,6 +443,7 @@ final class AdminApp
             .$chk('goal', 'Céltárgy: ha a játékoshoz kerül, a játék győzelemmel véget ér', !empty($pr['cel']))
             .View::field('Befejező szöveg (ezt meséli el az AI a győzelemkor)', 'ending', (string) ($pr['vege_szoveg'] ?? ''), 'textarea', ['rows' => 3])
             .'<button class="btn">'.($isNew ? 'Tárgy létrehozása' : 'Mentés').'</button></form>'
+            .($isNew ? '' : '<h2>Kép a helyszínképekre</h2>'.$this->spriteBlock($gid, 'targyak', $item['id']))
             .($isNew ? '' : '<h2>Veszélyzóna</h2>'.View::postButton('Tárgy törlése', ['a' => 'delete_item', 'g' => $gid, 'i' => $item['id']], 'Biztosan törlöd? A helyszínekről is eltűnik.', 'btn danger'));
 
         echo View::layout($isNew ? 'Új tárgy' : $item['name'], $body, $this->user, $this->takeFlash(),
@@ -657,6 +661,21 @@ final class AdminApp
                 $this->requireGame($gid);
                 $this->db->prepare('DELETE FROM rules WHERE game_id = ? AND id = ?')->execute([$gid, (int) ($_POST['r'] ?? 0)]);
                 $this->ok('A szabály törölve.', ['p' => 'game', 'g' => $gid]);
+
+            case 'upload_sprite':
+                $this->uploadSprite($gid);
+
+            case 'delete_sprite':
+                $sub = (string) ($_POST['sub'] ?? '');
+                $sid = (string) ($_POST['id'] ?? '');
+                if (isset(self::SPRITE_DIRS[$sub]) && preg_match(self::ID_PATTERN, $sid)) {
+                    $this->requireGame($gid);
+                    $this->removeSprite($gid, $sub, $sid);
+                }
+                $this->ok('A kép törölve.', $sub === 'targyak' ? ['p' => 'item', 'g' => $gid, 'i' => $sid] : ['p' => 'npc', 'g' => $gid, 'n' => $sid]);
+
+            case 'save_layers':
+                $this->saveLayers($gid, $lid);
 
             case 'upload_img':
                 $this->requireLocation($gid, $lid);
@@ -1052,6 +1071,186 @@ final class AdminApp
     }
 
     // =====================================================================
+    //  Képrétegek: tárgy- és szereplőképek, és a helyük a helyszínképen
+    // =====================================================================
+
+    private const SPRITE_DIRS = ['targyak' => 'tárgy', 'szereplok' => 'szereplő'];
+
+    private function spriteUrl(string $gid, string $sub, string $id): ?string
+    {
+        foreach (['webp', 'png'] as $ext) {
+            $file = $this->imageDir.'/'.$gid.'/'.$sub.'/'.$id.'.'.$ext;
+            if (is_file($file)) {
+                return $this->imageUrl.'/'.rawurlencode($gid).'/'.$sub.'/'.rawurlencode($id).'.'.$ext.'?v='.filemtime($file);
+            }
+        }
+
+        return null;
+    }
+
+    /** Kép feltöltése egy tárgyhoz vagy szereplőhöz (átlátszó hátterű WebP vagy PNG) */
+    private function spriteBlock(string $gid, string $sub, string $id): string
+    {
+        $url = $this->spriteUrl($gid, $sub, $id);
+
+        return '<div class="card">'
+            .($url ? '<div style="background:repeating-conic-gradient(#3a3550 0 25%,#2a2640 0 50%) 0 0/16px 16px;display:inline-block;padding:8px">'
+                .'<img src="'.View::e($url).'" alt="" style="max-height:120px;image-rendering:pixelated"></div>'
+                : '<p class="muted">Még nincs kép.</p>')
+            .'<form method="post" enctype="multipart/form-data" class="actions" style="margin-top:10px">'.View::csrf()
+            .'<input type="hidden" name="a" value="upload_sprite"><input type="hidden" name="g" value="'.View::e($gid).'">'
+            .'<input type="hidden" name="sub" value="'.View::e($sub).'"><input type="hidden" name="id" value="'.View::e($id).'">'
+            .'<input type="file" name="image" accept=".webp,.png,image/webp,image/png" required>'
+            .'<button class="btn">'.($url ? 'Csere' : 'Feltöltés').'</button></form>'
+            .'<p class="muted" style="font-size:13px">Átlátszó hátterű WebP vagy PNG, legfeljebb 5 MB. Hogy melyik helyszínképen hova kerüljön, a helyszín lapján állíthatod be. '
+            .'Ha nincs képe vagy helye, a játék egyszerűen nélküle mutatja a helyszínt.</p>'
+            .($url ? View::postButton('Kép törlése', ['a' => 'delete_sprite', 'g' => $gid, 'sub' => $sub, 'id' => $id], 'Törlöd a képet?', 'btn danger small') : '')
+            .'</div>';
+    }
+
+    private function uploadSprite(string $gid): never
+    {
+        $this->requireGame($gid);
+        $sub = (string) ($_POST['sub'] ?? '');
+        $id = (string) ($_POST['id'] ?? '');
+        if (!isset(self::SPRITE_DIRS[$sub]) || !preg_match(self::ID_PATTERN, $id)) {
+            $this->fail('Hibás adatok.');
+        }
+        $back = $sub === 'targyak' ? ['p' => 'item', 'g' => $gid, 'i' => $id] : ['p' => 'npc', 'g' => $gid, 'n' => $id];
+        $f = $_FILES['image'] ?? null;
+        if (!$f || ($f['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+            $this->fail('A feltöltés nem sikerült (lehet, hogy túl nagy a fájl).');
+        }
+        if ($f['size'] > self::MAX_IMAGE_BYTES) {
+            $this->fail('A kép legfeljebb 5 MB lehet.');
+        }
+        $ext = match (@getimagesize($f['tmp_name'])[2] ?? null) {
+            IMAGETYPE_WEBP => 'webp',
+            IMAGETYPE_PNG  => 'png',
+            default        => null,
+        };
+        if ($ext === null) {
+            $this->fail('Csak WebP vagy PNG tölthető fel (a JPG nem tud átlátszó hátteret).');
+        }
+        $dir = $this->imageDir.'/'.$gid.'/'.$sub;
+        if (!is_dir($dir) && !mkdir($dir, 0755, true)) {
+            $this->fail('A képmappa nem hozható létre (jogosultság?).');
+        }
+        $this->removeSprite($gid, $sub, $id);
+        $target = $dir.'/'.$id.'.'.$ext;
+        if (!move_uploaded_file($f['tmp_name'], $target)) {
+            $this->fail('A kép mentése nem sikerült (jogosultság?).');
+        }
+        @chmod($target, 0644);
+        $this->ok('A kép feltöltve.', $back);
+    }
+
+    private function removeSprite(string $gid, string $sub, string $id): void
+    {
+        foreach (['webp', 'png'] as $ext) {
+            $file = $this->imageDir.'/'.$gid.'/'.$sub.'/'.$id.'.'.$ext;
+            if (is_file($file)) {
+                @unlink($file);
+            }
+        }
+    }
+
+    /** A helyszín rétegszerkesztője: a képre kattintva kijelölhető, hova kerüljön egy tárgy vagy szereplő. */
+    private function layersEditor(array $loc, string $bgUrl): string
+    {
+        $gid = $loc['game_id'];
+        $pos = json_decode((string) ($loc['layers'] ?? '{}'), true) ?: [];
+        $rows = [];
+        $stmt = $this->db->prepare('SELECT id, name FROM items WHERE game_id = ? ORDER BY name');
+        $stmt->execute([$gid]);
+        foreach ($stmt->fetchAll() as $i) {
+            if ($url = $this->spriteUrl($gid, 'targyak', $i['id'])) {
+                $rows[] = [$i['id'], $i['name'], $url];
+            }
+        }
+        $stmt = $this->db->prepare('SELECT id, name FROM npcs WHERE game_id = ? ORDER BY name');
+        $stmt->execute([$gid]);
+        foreach ($stmt->fetchAll() as $n) {
+            if ($url = $this->spriteUrl($gid, 'szereplok', $n['id'])) {
+                $rows[] = ['@'.$n['id'], '👤 '.$n['name'], $url];
+            }
+        }
+        if (!$rows) {
+            return '<p class="muted" style="font-size:13px">Képrétegek: ha egy tárgynak vagy szereplőnek feltöltesz egy átlátszó hátterű képet (a tárgy vagy a szereplő lapján), '
+                .'itt beállíthatod, hova kerüljön ezen a képen. Akkor jelenik meg, amikor a tárgy itt hever, vagy a szereplő itt van.</p>';
+        }
+
+        $trs = '';
+        foreach ($rows as $n => [$key, $name, $url]) {
+            $p = $pos[$key] ?? [];
+            $num = fn (string $f, string $k, $def) => '<input type="number" step="any" min="0" max="100" name="'.$f.'['.View::e($key).']" value="'.View::e((string) ($p[$k] ?? $def)).'" style="width:70px" data-k="'.$k.'">';
+            $trs .= '<tr data-key="'.View::e($key).'" data-src="'.View::e($url).'"><td><input type="radio" name="sel" value="'.$n.'"'.($n === 0 ? ' checked' : '').'></td>'
+                .'<td><img src="'.View::e($url).'" alt="" style="height:28px;image-rendering:pixelated;vertical-align:middle"> '.View::e($name).'</td>'
+                .'<td>'.$num('x', 'x', '').'</td><td>'.$num('y', 'y', '').'</td><td>'.$num('w', 'w', '').'</td>'
+                .'<td><button type="button" class="btn small" data-clear>Nem kerül rá</button></td></tr>';
+        }
+
+        return '<h2>Képrétegek</h2><p class="muted" style="font-size:13px">Válaszd ki a sort, majd kattints a képre oda, ahol a tárgy vagy a szereplő <b>talppontja</b> legyen. '
+            .'A szélesség a kép szélességének százaléka. Üresen hagyva nem kerül a képre. A játékban csak akkor jelenik meg, ha a tárgy itt hever, vagy a szereplő itt van.</p>'
+            .'<form method="post" class="card" id="layerform">'.View::csrf().'<input type="hidden" name="a" value="save_layers"><input type="hidden" name="g" value="'.View::e($gid).'"><input type="hidden" name="l" value="'.View::e($loc['id']).'">'
+            .'<div id="lprev" style="position:relative;max-width:720px;cursor:crosshair;user-select:none"><img src="'.View::e($bgUrl).'" alt="" style="width:100%;display:block"></div><br>'
+            .'<table><tr><th></th><th>Kép</th><th>x %</th><th>y %</th><th>szélesség %</th><th></th></tr>'.$trs.'</table><br>'
+            .'<button class="btn">Rétegek mentése</button></form>'
+            .<<<'JS'
+<script>
+(() => {
+  const box = document.getElementById('lprev'), rows = [...document.querySelectorAll('#layerform tr[data-key]')];
+  const val = (tr, k) => tr.querySelector('[data-k="' + k + '"]');
+  function draw() {
+    box.querySelectorAll('.lay').forEach(e => e.remove());
+    for (const tr of rows) {
+      const x = parseFloat(val(tr, 'x').value), y = parseFloat(val(tr, 'y').value), w = parseFloat(val(tr, 'w').value);
+      if (isNaN(x) || isNaN(y) || isNaN(w)) continue;
+      const im = document.createElement('img');
+      im.className = 'lay'; im.src = tr.dataset.src;
+      im.style.cssText = `position:absolute;left:${x}%;top:${y}%;width:${w}%;transform:translate(-50%,-100%);pointer-events:none;image-rendering:pixelated;z-index:${Math.round(y)}`;
+      box.append(im);
+    }
+  }
+  box.addEventListener('click', e => {
+    const r = box.getBoundingClientRect(), sel = document.querySelector('#layerform input[name=sel]:checked');
+    if (!sel) return;
+    const tr = rows[+sel.value];
+    val(tr, 'x').value = (100 * (e.clientX - r.left) / r.width).toFixed(1);
+    val(tr, 'y').value = (100 * (e.clientY - r.top) / r.height).toFixed(1);
+    if (!val(tr, 'w').value) val(tr, 'w').value = 8;
+    draw();
+  });
+  rows.forEach(tr => {
+    tr.querySelectorAll('input[type=number]').forEach(i => i.addEventListener('input', draw));
+    tr.querySelector('[data-clear]').addEventListener('click', () => { ['x', 'y', 'w'].forEach(k => val(tr, k).value = ''); draw(); });
+  });
+  draw();
+})();
+</script>
+JS;
+    }
+
+    private function saveLayers(string $gid, string $lid): never
+    {
+        $this->requireLocation($gid, $lid);
+        $out = [];
+        foreach ((array) ($_POST['x'] ?? []) as $key => $x) {
+            $key = (string) $key;
+            $y = $_POST['y'][$key] ?? '';
+            $w = $_POST['w'][$key] ?? '';
+            if (!preg_match('/^@?[a-z0-9_]{1,50}$/', $key) || $x === '' || $y === '' || $w === '') {
+                continue;
+            }
+            $clamp = fn ($v, $min) => round(max($min, min(100, (float) $v)), 1);
+            $out[$key] = ['x' => $clamp($x, 0), 'y' => $clamp($y, 0), 'w' => $clamp($w, 0.5)];
+        }
+        $this->db->prepare('UPDATE locations SET layers = ? WHERE game_id = ? AND id = ?')
+            ->execute([json_encode($out ?: new \stdClass()), $gid, $lid]);
+        $this->ok('A rétegek mentve.', ['p' => 'loc', 'g' => $gid, 'l' => $lid]);
+    }
+
+    // =====================================================================
     //  Szereplők, témák, kereskedés
     // =====================================================================
 
@@ -1123,6 +1322,7 @@ final class AdminApp
                 .'<div class="actions"><a class="btn" href="'.View::e(View::url(['p' => 'topic', 'g' => $gid, 'n' => $nid])).'">+ Új téma</a></div><br>'
                 .($trows ? '<table><tr><th>Téma</th><th>Amit elmond</th><th>Feltételek</th><th>Hatások</th></tr>'.$trows.'</table>' : '<p class="muted">Még nincs téma.</p>')
                 .'<h2>Kereskedés</h2>'.$this->tradesBlock($gid, 'npc', $nid)
+                .'<h2>Kép a helyszínképekre</h2>'.$this->spriteBlock($gid, 'szereplok', $nid)
                 .'<h2>Veszélyzóna</h2>'.View::postButton('Szereplő törlése', ['a' => 'delete_npc', 'g' => $gid, 'n' => $nid], 'Biztosan törlöd a szereplőt a témáival és a kereskedésével együtt?', 'btn danger');
         }
 
