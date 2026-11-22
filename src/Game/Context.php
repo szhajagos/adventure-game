@@ -18,6 +18,8 @@ final class Context
     /** @var list<string> a művelet után létrehozandó ellenőrző pontok */
     public array $checkpoints = [];
     public ?string $blocked = null;
+    /** Közelkép a panelnek (megvizsgáláskor): ['kep' => url, 'cim' => név] */
+    public ?array $closeup = null;
     /** Hány szabály teljesült (az óránkéntiek és az éjféliek nélkül) – a menj_ide ennél áll meg */
     public int $notable = 0;
     /** @var array<string, list<string>> helyszín => felszereltség */

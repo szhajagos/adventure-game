@@ -67,6 +67,7 @@ final class Rules
         'megbizas'      => ['["megbízás_id", "folyamatban"]', 'egy megbízás állapota (felajanlva nincs; folyamatban, teljesitve, elbukott, elutasitva)'],
         'tartozik'      => ['"szereplő_id"', 'a játékosnak kölcsöntartozása van a szereplő felé'],
         'munka'         => ['"munka_id"', 'a dolgozik művelet munkája ez'],
+        'reszlet'       => ['"részlet_id"', 'a megvizsgál művelet a helyszín ezen részletére (látnivalójára) irányul'],
         'celpont'       => ['"tárgy_id" vagy "felszereltség"', 'a használ művelet célpontja (egy tárgy vagy a helyszín felszereltsége, pl. ivokut)'],
         'jarmuben'      => ['"tárgy_id" vagy true', 'a játékos (ebben) a járműben ül'],
         'veletlen'      => ['szám (0–100)', 'ennyi százalék eséllyel teljesül'],
@@ -231,6 +232,7 @@ final class Rules
             'tartozik'      => $st->loan((string) $v) !== null,
             'munka'         => ($event['munka'] ?? null) === $v,
             'celpont'       => ($event['celpont'] ?? null) === $v,
+            'reszlet'       => ($event['reszlet'] ?? null) === $v,
             'jarmuben'      => $v === true ? $st->extra('jarmu') !== null
                 : (($j = $st->extra('jarmu')) !== null && ($ctx->world->get((int) $j)['item_id'] ?? null) === $v),
             'veletlen'      => $st->random(1, 100) <= (int) $v,

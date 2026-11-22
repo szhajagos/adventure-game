@@ -91,6 +91,7 @@ final class AdminApp
                 'topic'    => $this->pageTopic(),
                 'quest'    => $this->pageQuest(),
                 'recipe'   => $this->pageRecipe(),
+                'detail'   => $this->pageDetail(),
                 'export'   => $this->export(),
                 default    => $this->pageHome(),
             };
@@ -407,6 +408,7 @@ final class AdminApp
             .$exitForm
             .'<h2>Tárgyak a helyszínen (a játék elején)</h2>'.($trows ? '<table><tr><th>Tárgy</th><th>Darab</th><th></th></tr>'.$trows.'</table>' : '<p class="muted">Nincs itt tárgy.</p>')
             .$itemForm
+            .'<h2>Részletek (látnivalók)</h2><p class="muted">A helyszínhez rögzített dolgok, amelyeket meg lehet vizsgálni, saját szöveggel és közelképpel.</p>'.$this->detailsBlock($gid, $lid)
             .'<h2>Munka ezen a helyszínen</h2>'.$this->jobsBlock($gid, $lid)
             .'<h2>Kereskedés a helyszínen (automata, bolt szereplő nélkül)</h2>'.$this->tradesBlock($gid, 'location', $lid)
             .'<h2>Veszélyzóna</h2>'
@@ -474,6 +476,7 @@ final class AdminApp
             .$chk('goal', 'Céltárgy: ha a játékoshoz kerül, a játék győzelemmel véget ér', !empty($pr['cel']))
             .View::field('Befejező szöveg (ezt meséli el az AI a győzelemkor)', 'ending', (string) ($pr['vege_szoveg'] ?? ''), 'textarea', ['rows' => 3])
             .'<button class="btn">'.($isNew ? 'Tárgy létrehozása' : 'Mentés').'</button></form>'
+            .($isNew ? '' : '<h2>Közelkép (megvizsgáláskor)</h2>'.$this->closeupBlock($gid, 'targy', $item['id']))
             .($isNew ? '' : '<h2>Kép a helyszínképekre</h2>'.$this->spriteBlock($gid, 'targyak', $item['id']))
             .($isNew ? '' : '<h2>Veszélyzóna</h2>'.View::postButton('Tárgy törlése', ['a' => 'delete_item', 'g' => $gid, 'i' => $item['id']], 'Biztosan törlöd? A helyszínekről is eltűnik.', 'btn danger'));
 
@@ -689,6 +692,20 @@ final class AdminApp
                 $this->db->prepare('DELETE FROM trades WHERE game_id = ? AND id = ?')->execute([$gid, (int) ($_POST['id'] ?? 0)]);
                 [$bt, $bid] = explode(':', (string) ($_POST['back'] ?? 'location:'), 2) + ['', ''];
                 $this->ok('Kereskedési sor törölve.', $bt === 'npc' ? ['p' => 'npc', 'g' => $gid, 'n' => $bid] : ['p' => 'loc', 'g' => $gid, 'l' => $bid]);
+
+            case 'save_detail':
+                $this->saveDetail($gid, $lid);
+
+            case 'delete_detail':
+                $this->requireLocation($gid, $lid);
+                $this->db->prepare('DELETE FROM location_details WHERE game_id = ? AND id = ?')->execute([$gid, (string) ($_POST['d'] ?? '')]);
+                $this->ok('A részlet törölve.', ['p' => 'loc', 'g' => $gid, 'l' => $lid]);
+
+            case 'upload_closeup':
+                $this->uploadCloseup($gid, false);
+
+            case 'delete_closeup':
+                $this->uploadCloseup($gid, true);
 
             case 'save_recipe':
                 $this->saveRecipe($gid);
@@ -961,7 +978,7 @@ final class AdminApp
         $out = "-- MCP Adventure – a(z) „{$game['title']}” játék exportja\n-- Készült: ".date('Y-m-d H:i:s')."\n"
             ."-- Betöltés: phpMyAdmin → Importálás. Ha a játék már létezik, előbb töröld (lásd lent).\nSET NAMES utf8mb4;\n\n"
             ."-- DELETE FROM location_items WHERE game_id = ".$q($gid)."; DELETE FROM exits WHERE game_id = ".$q($gid).";\n"
-            ."-- DELETE FROM recipes WHERE game_id = ".$q($gid)."; DELETE FROM quests WHERE game_id = ".$q($gid)."; DELETE FROM jobs WHERE game_id = ".$q($gid).";\n"
+            ."-- DELETE FROM location_details WHERE game_id = ".$q($gid)."; DELETE FROM recipes WHERE game_id = ".$q($gid)."; DELETE FROM quests WHERE game_id = ".$q($gid)."; DELETE FROM jobs WHERE game_id = ".$q($gid).";\n"
             ."-- DELETE FROM trades WHERE game_id = ".$q($gid)."; DELETE FROM npc_topics WHERE game_id = ".$q($gid)."; DELETE FROM npcs WHERE game_id = ".$q($gid).";\n"
             ."-- DELETE FROM rules WHERE game_id = ".$q($gid)."; DELETE FROM game_stats WHERE game_id = ".$q($gid)."; DELETE FROM items WHERE game_id = ".$q($gid)."; DELETE FROM locations WHERE game_id = ".$q($gid)."; DELETE FROM games WHERE id = ".$q($gid).";\n\n";
 
@@ -975,6 +992,7 @@ final class AdminApp
             'npcs'           => ['SELECT * FROM npcs WHERE game_id = ? ORDER BY sort_order, id', []],
             'npc_topics'     => ['SELECT game_id, npc_id, title, keywords, content, conditions, effects, sort_order FROM npc_topics WHERE game_id = ? ORDER BY npc_id, sort_order, id', []],
             'trades'         => ['SELECT game_id, trader_type, trader_id, mode, item_id, price, price_item_id, daily_limit, conditions, sort_order FROM trades WHERE game_id = ? ORDER BY id', []],
+            'location_details' => ['SELECT * FROM location_details WHERE game_id = ? ORDER BY location_id, sort_order, id', []],
             'recipes'        => ['SELECT * FROM recipes WHERE game_id = ? ORDER BY id', []],
             'quests'         => ['SELECT * FROM quests WHERE game_id = ? ORDER BY sort_order, id', []],
             'jobs'           => ['SELECT * FROM jobs WHERE game_id = ? ORDER BY sort_order, id', []],
@@ -1315,6 +1333,164 @@ JS;
         $this->db->prepare('UPDATE locations SET layers = ? WHERE game_id = ? AND id = ?')
             ->execute([json_encode($out ?: new \stdClass()), $gid, $lid]);
         $this->ok('A rétegek mentve.', ['p' => 'loc', 'g' => $gid, 'l' => $lid]);
+    }
+
+    // =====================================================================
+    //  Részletek (látnivalók) és közelképek
+    // =====================================================================
+
+    private function closeupUrl(string $gid, string $path): ?string
+    {
+        foreach (self::IMAGE_EXT as $ext) {
+            $file = $this->imageDir.'/'.$gid.'/'.$path.'.'.$ext;
+            if (is_file($file)) {
+                return $this->imageUrl.'/'.rawurlencode($gid).'/'.str_replace('%2F', '/', rawurlencode($path)).'.'.$ext.'?v='.filemtime($file);
+            }
+        }
+
+        return null;
+    }
+
+    /** Közelkép feltöltése (tárgyhoz: targyak/<id>~nezet, részlethez: reszletek/<id>) */
+    private function closeupBlock(string $gid, string $kind, string $id): string
+    {
+        $path = $kind === 'targy' ? 'targyak/'.$id.'~nezet' : 'reszletek/'.$id;
+        $url = $this->closeupUrl($gid, $path);
+
+        return '<div class="card">'
+            .($url ? '<img src="'.View::e($url).'" alt="" style="max-width:320px;max-height:220px;border-radius:6px;display:block">' : '<p class="muted">Még nincs közelkép.</p>')
+            .'<form method="post" enctype="multipart/form-data" class="actions" style="margin-top:10px">'.View::csrf()
+            .'<input type="hidden" name="a" value="upload_closeup"><input type="hidden" name="g" value="'.View::e($gid).'">'
+            .'<input type="hidden" name="kind" value="'.View::e($kind).'"><input type="hidden" name="id" value="'.View::e($id).'">'
+            .'<input type="file" name="image" accept=".webp,.jpg,.jpeg,.png" required><button class="btn">'.($url ? 'Csere' : 'Feltöltés').'</button></form>'
+            .'<p class="muted" style="font-size:13px">Kisebb kép, amelyet a panel megvizsgáláskor mutat (pl. 640×400). WebP, JPG vagy PNG, legfeljebb 5 MB. Ha nincs, a játék kép nélkül meséli el.</p>'
+            .($url ? View::postButton('Közelkép törlése', ['a' => 'delete_closeup', 'g' => $gid, 'kind' => $kind, 'id' => $id], 'Törlöd a közelképet?', 'btn danger small') : '')
+            .'</div>';
+    }
+
+    private function uploadCloseup(string $gid, bool $delete): never
+    {
+        $this->requireGame($gid);
+        $kind = (string) ($_POST['kind'] ?? '');
+        $id = (string) ($_POST['id'] ?? '');
+        if (!in_array($kind, ['targy', 'reszlet'], true) || !preg_match(self::ID_PATTERN, $id)) {
+            $this->fail('Hibás adatok.');
+        }
+        $back = $kind === 'targy' ? ['p' => 'item', 'g' => $gid, 'i' => $id] : ['p' => 'detail', 'g' => $gid, 'd' => $id];
+        $dir = $this->imageDir.'/'.$gid.'/'.($kind === 'targy' ? 'targyak' : 'reszletek');
+        $base = $kind === 'targy' ? $id.'~nezet' : $id;
+        foreach (self::IMAGE_EXT as $ext) {
+            if (is_file($dir.'/'.$base.'.'.$ext)) {
+                @unlink($dir.'/'.$base.'.'.$ext);
+            }
+        }
+        if ($delete) {
+            $this->ok('A közelkép törölve.', $back);
+        }
+        $f = $_FILES['image'] ?? null;
+        if (!$f || ($f['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK || $f['size'] > self::MAX_IMAGE_BYTES) {
+            $this->fail('A feltöltés nem sikerült (legfeljebb 5 MB).');
+        }
+        $ext = match (@getimagesize($f['tmp_name'])[2] ?? null) {
+            IMAGETYPE_WEBP => 'webp',
+            IMAGETYPE_JPEG => 'jpg',
+            IMAGETYPE_PNG  => 'png',
+            default        => null,
+        };
+        if ($ext === null) {
+            $this->fail('Csak WebP, JPG vagy PNG tölthető fel.');
+        }
+        if (!is_dir($dir) && !mkdir($dir, 0755, true)) {
+            $this->fail('A képmappa nem hozható létre (jogosultság?).');
+        }
+        if (!move_uploaded_file($f['tmp_name'], $dir.'/'.$base.'.'.$ext)) {
+            $this->fail('A kép mentése nem sikerült (jogosultság?).');
+        }
+        @chmod($dir.'/'.$base.'.'.$ext, 0644);
+        $this->ok('A közelkép feltöltve.', $back);
+    }
+
+    private function detailsBlock(string $gid, string $lid): string
+    {
+        $stmt = $this->db->prepare('SELECT * FROM location_details WHERE game_id = ? AND location_id = ? ORDER BY sort_order, id');
+        $stmt->execute([$gid, $lid]);
+        $rows = '';
+        foreach ($stmt->fetchAll() as $d) {
+            $rows .= '<tr><td><a href="'.View::e(View::url(['p' => 'detail', 'g' => $gid, 'd' => $d['id']])).'"><b>'.View::e($d['name']).'</b></a>'
+                .($d['hidden'] ? ' <span class="badge">rejtett</span>' : '').($this->closeupUrl($gid, 'reszletek/'.$d['id']) ? ' <span class="badge ok">közelkép</span>' : '')
+                .'<div class="muted">'.View::e((string) $d['keywords']).'</div></td><td>'.View::e(mb_strimwidth($d['description'], 0, 140, '…')).'</td></tr>';
+        }
+
+        return ($rows ? '<table><tr><th>Részlet</th><th>Amit lát</th></tr>'.$rows.'</table><br>' : '<p class="muted">Nincs részlet. Részlet az, ami a helyszínhez tartozik, de nem tárgy: hirdetés, műszerfal, konyhapult.</p>')
+            .'<div class="actions"><a class="btn" href="'.View::e(View::url(['p' => 'detail', 'g' => $gid, 'l' => $lid])).'">+ Új részlet</a></div>';
+    }
+
+    private function pageDetail(): void
+    {
+        $game = $this->requireGame((string) ($_GET['g'] ?? ''));
+        $gid = $game['id'];
+        $did = (string) ($_GET['d'] ?? '');
+        $d = null;
+        if ($did !== '') {
+            $stmt = $this->db->prepare('SELECT * FROM location_details WHERE game_id = ? AND id = ?');
+            $stmt->execute([$gid, $did]);
+            $d = $stmt->fetch() ?: $this->notFound();
+        }
+        $isNew = $d === null;
+        $lid = $isNew ? (string) ($_GET['l'] ?? '') : $d['location_id'];
+        $loc = $this->requireLocation($gid, $lid);
+        $d ??= ['id' => '', 'name' => '', 'keywords' => '', 'description' => '', 'hidden' => 0, 'conditions' => '[]', 'effects' => '[]', 'sort_order' => 100];
+        $pretty = fn (string $j) => ($x = json_decode($j, true)) ? json_encode($x, JSON_UNESCAPED_UNICODE) : '';
+
+        $body = '<form method="post" class="card">'.View::csrf().'<input type="hidden" name="a" value="save_detail"><input type="hidden" name="g" value="'.View::e($gid).'"><input type="hidden" name="l" value="'.View::e($lid).'">'
+            .($isNew ? '<input type="hidden" name="new" value="1">'.View::field('Azonosító (a játékban egyedi; a közelkép neve is ez)', 'd', '', 'text', ['required' => true, 'pattern' => '[a-z0-9_]{1,50}'])
+                     : '<input type="hidden" name="d" value="'.View::e($d['id']).'"><p class="mono muted">Azonosító: '.View::e($d['id']).'</p>')
+            .View::field('Név (pl. hirdetés a lámpaoszlopon)', 'name', $d['name'], 'text', ['required' => true, 'maxlength' => 150])
+            .View::field('Kulcsszavak (vesszővel; a játékos szavai, pl. hirdetés, cetli, plakát)', 'keywords', (string) $d['keywords'], 'text')
+            .View::field('Amit alapos megnézésre lát', 'description', $d['description'], 'textarea', ['rows' => 4, 'required' => true])
+            .'<label style="display:block;margin:6px 0"><input type="checkbox" name="hidden" value="1"'.($d['hidden'] ? ' checked' : '').'> Rejtett: nem szerepel a látnivalók között, csak ha a játékos rákérdez</label>'
+            .View::field('Mikor látható (feltételek, JSON; pl. [{"napszak": "nappal"}])', 'conditions', $pretty((string) $d['conditions']), 'text', ['class' => 'mono'])
+            .View::field('Az első megnézéskor (hatások, JSON; pl. [{"jelzo": ["tudja_a_kodot", true]}])', 'effects', $pretty((string) $d['effects']), 'text', ['class' => 'mono'])
+            .View::field('Sorrend', 'sort_order', $d['sort_order'], 'number')
+            .'<button class="btn">'.($isNew ? 'Részlet létrehozása' : 'Mentés').'</button></form>'
+            .($isNew ? '' : '<h2>Közelkép</h2>'.$this->closeupBlock($gid, 'reszlet', $d['id'])
+                .'<h2>Veszélyzóna</h2>'.View::postButton('Részlet törlése', ['a' => 'delete_detail', 'g' => $gid, 'l' => $lid, 'd' => $d['id']], 'Törlöd a részletet?', 'btn danger'));
+
+        $title = $isNew ? 'Új részlet' : $d['name'];
+        echo View::layout($title, $body, $this->user, $this->takeFlash(),
+            ['Játékok' => '/admin/', $game['title'] => View::url(['p' => 'game', 'g' => $gid]), $loc['name'] => View::url(['p' => 'loc', 'g' => $gid, 'l' => $lid]), $title => null]);
+    }
+
+    private function saveDetail(string $gid, string $lid): never
+    {
+        $this->requireLocation($gid, $lid);
+        $did = (string) ($_POST['d'] ?? '');
+        $name = trim((string) ($_POST['name'] ?? ''));
+        $desc = trim((string) ($_POST['description'] ?? ''));
+        if ($name === '' || $desc === '') {
+            $this->fail('A név és a leírás kötelező.');
+        }
+        $conds = trim((string) ($_POST['conditions'] ?? '')) ?: '[]';
+        $effects = trim((string) ($_POST['effects'] ?? '')) ?: '[]';
+        if ($errors = array_merge(Rules::validate($conds, Rules::CONDITIONS, 'feltételek'), Rules::validate($effects, Rules::EFFECTS, 'hatások'))) {
+            $this->fail(implode(' ', $errors));
+        }
+        $vals = [$name, trim((string) ($_POST['keywords'] ?? '')) ?: null, $desc, !empty($_POST['hidden']) ? 1 : 0,
+            json_encode(json_decode($conds, true), JSON_UNESCAPED_UNICODE), json_encode(json_decode($effects, true), JSON_UNESCAPED_UNICODE), (int) ($_POST['sort_order'] ?? 100)];
+        if (!empty($_POST['new'])) {
+            $this->validId($did, 'részlet');
+            $stmt = $this->db->prepare('SELECT 1 FROM location_details WHERE game_id = ? AND id = ?');
+            $stmt->execute([$gid, $did]);
+            if ($stmt->fetchColumn()) {
+                $this->fail('Ilyen azonosítójú részlet már van ebben a játékban.');
+            }
+            $this->db->prepare('INSERT INTO location_details (name, keywords, description, hidden, conditions, effects, sort_order, game_id, id, location_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+                ->execute([...$vals, $gid, $did, $lid]);
+        } else {
+            $this->db->prepare('UPDATE location_details SET name = ?, keywords = ?, description = ?, hidden = ?, conditions = ?, effects = ?, sort_order = ? WHERE game_id = ? AND id = ?')
+                ->execute([...$vals, $gid, $did]);
+        }
+        $this->ok('A részlet mentve.', ['p' => 'detail', 'g' => $gid, 'd' => $did]);
     }
 
     // =====================================================================

@@ -28,6 +28,10 @@
   /* Kép */
   .scene { position: relative; aspect-ratio: 16 / 9; border: 2px solid var(--frame); overflow: hidden; background: #000; }
   .scene[hidden] { display: none; }
+  .closeup { margin: 10px auto 4px; text-align: center; }
+  .closeup[hidden] { display: none; }
+  .closeup img { max-width: 60%; max-height: 260px; border: 2px solid var(--line, #4a4470); border-radius: 6px; display: block; margin: 0 auto; }
+  .closeup figcaption { font-size: 11px; color: var(--muted); margin-top: 4px; letter-spacing: .05em; text-transform: uppercase; }
   .layers { position: absolute; inset: 0; pointer-events: none; }
   .layers { z-index: 1; }
   .caption, .end { z-index: 2; }
@@ -91,6 +95,11 @@
       <div class="layers" id="layers"></div>
       <div class="end" id="end" hidden><b id="endTitle"></b><span id="endText"></span></div>
     </div>
+
+    <figure class="closeup" id="closeup" hidden>
+      <img id="closeImg" alt="">
+      <figcaption id="closeCap"></figcaption>
+    </figure>
 
     <div class="stats" id="stats"></div>
 
@@ -214,6 +223,16 @@
     $('empty').hidden = true; $('content').hidden = false;
     // Kicsi panel: ugyanazon a helyszínen maradva nem kell újra a kép, a helyszín neve a fejlécbe kerül
     document.querySelector('.scene').hidden = !!p.kompakt;
+
+    // Közelkép (megvizsgáláskor): kisebb kép a részletről vagy a tárgyról; ha nem töltődik be, eltűnik
+    const cu = p.kozelkep, cimg = $('closeImg');
+    $('closeup').hidden = !cu;
+    if (cu) {
+      cimg.onerror = () => { $('closeup').hidden = true; };
+      cimg.onload = () => { cimg.style.imageRendering = cimg.naturalWidth <= 320 ? 'pixelated' : ''; };
+      cimg.src = cu.kep;
+      $('closeCap').textContent = cu.cim || '';
+    }
     $('game').textContent = p.kompakt ? (p.jatek || 'MCP Adventure') + ' · ' + (p.helyszin || '') : (p.jatek || 'MCP Adventure');
     const parts = { hajnal: '🌅 hajnal', nappal: '☀ nappal', este: '🌇 este', ejszaka: '🌙 éjszaka' };
     const sky = { derult: '☀ derült', felhos: '☁ felhős', esos: '🌧 esős', havas: '❄ havas', kodos: '🌫 ködös', viharos: '⛈ viharos' };

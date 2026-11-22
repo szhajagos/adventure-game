@@ -447,7 +447,16 @@ final class GameEngine
             $w = $ctx->world;
             [$inst, $alts] = $w->findByName($item, array_merge($w->carried(), $w->atLocationDeep($ctx->location)));
             if ($inst === null) {
-                return $this->notFound($item, $alts, 'elerheto');
+                // nem tárgy: talán a helyszín egy részlete (hirdetés, műszerfal, konyhapult)
+                $detail = $this->findDetail($ctx, $item);
+                if ($detail !== null) {
+                    return $this->examineDetail($ctx, $detail);
+                }
+                $out = $this->notFound($item, $alts, 'elerheto');
+                if (!$alts && ($seen = array_column($this->details($ctx, false), 'name'))) {
+                    $out['latnivalok'] = $seen;
+                }
+                return $out;
             }
 
             return $this->rules($ctx)->around($ctx, $this->event('megvizsgal', $inst), function () use ($ctx, $inst) {
@@ -471,6 +480,10 @@ final class GameEngine
                 if (isset($props['tarolo'])) {
                     $out['targy']['tartalom'] = array_map(fn ($c) => ['nev' => $w->name($c), 'darab' => (int) $c['quantity']], $w->at('container', (string) $inst['id']));
                     $out['targy']['kapacitas'] = (int) ($props['tarolo']['kapacitas'] ?? 0);
+                }
+                // közelkép: targyak/<tárgy>~nezet.webp – bárhol is van a tárgy
+                if ($url = $this->imageFile($ctx->gameId(), 'targyak/'.$inst['item_id'].'~nezet')) {
+                    $ctx->closeup = ['kep' => $url, 'cim' => $type['name']];
                 }
 
                 return $out;
@@ -791,6 +804,83 @@ final class GameEngine
         $stmt->execute([$gameId]);
 
         return $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+    }
+
+    // =====================================================================
+    //  A helyszín részletei (látnivalók) és a közelképek
+    // =====================================================================
+
+    /** @return list<array> a helyszín most látható részletei (a rejtettek csak $withHidden mellett) */
+    private function details(Context $ctx, bool $withHidden): array
+    {
+        $stmt = $this->db->prepare('SELECT * FROM location_details WHERE game_id = ? AND location_id = ? ORDER BY sort_order, id');
+        $stmt->execute([$ctx->gameId(), $ctx->location]);
+
+        return array_values(array_filter($stmt->fetchAll(), fn ($d) => ($withHidden || !$d['hidden'])
+            && Rules::check(json_decode((string) $d['conditions'], true) ?: [], $ctx, ['muvelet' => 'megvizsgal', 'reszlet' => $d['id']])));
+    }
+
+    private function findDetail(Context $ctx, string $query): ?array
+    {
+        $q = World::simplify($query);
+        if ($q === '') {
+            return null;
+        }
+        $all = $this->details($ctx, true);
+        foreach ($all as $d) {
+            if (World::simplify($d['name']) === $q || World::simplify($d['id']) === $q) {
+                return $d;
+            }
+        }
+        foreach ($all as $d) {
+            $words = array_filter(array_map([World::class, 'simplify'], explode(',', $d['name'].','.(string) $d['keywords'])));
+            foreach ($words as $word) {
+                if (strlen($word) >= 3 && (str_contains($q, $word) || str_contains($word, $q))) {
+                    return $d;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private function examineDetail(Context $ctx, array $d): array
+    {
+        $event = ['muvelet' => 'megvizsgal', 'reszlet' => $d['id']];
+
+        return $this->rules($ctx)->around($ctx, $event, function () use ($ctx, $d) {
+            $ctx->passTime(self::MINUTES['megvizsgal']);
+            $first = !$ctx->state->flag('_reszlet:'.$d['id']);
+            if ($first) {
+                $ctx->state->setFlag('_reszlet:'.$d['id'], true);
+                Rules::apply(json_decode((string) $d['effects'], true) ?: [], $ctx, ['muvelet' => 'megvizsgal', 'reszlet' => $d['id']]);
+            }
+            if ($url = $this->imageFile($ctx->gameId(), 'reszletek/'.$d['id'])) {
+                $ctx->closeup = ['kep' => $url, 'cim' => $d['name']];
+            }
+
+            return [
+                'siker'   => true,
+                'esemeny' => sprintf('A játékos alaposan megnézte: %s.', $d['name']),
+                'reszlet' => ['nev' => $d['name'], 'amit_lat' => $d['description'], 'mar_latta' => !$first],
+            ];
+        });
+    }
+
+    /** Egy kép az assets/images/<játék>/ alatt (webp, png, jpg) – ha nincs, null */
+    private function imageFile(string $gameId, string $path): ?string
+    {
+        if ($this->imageDir === null || $this->imageUrl === null || !preg_match('#^[a-z0-9_]+/[a-z0-9_~-]+$#', $path)) {
+            return null;
+        }
+        foreach (self::IMAGE_EXTENSIONS as $ext) {
+            $file = $this->imageDir.'/'.$gameId.'/'.$path.'.'.$ext;
+            if (is_file($file)) {
+                return $this->imageUrl.'/'.$gameId.'/'.$path.'.'.$ext.'?v='.filemtime($file);
+            }
+        }
+
+        return null;
     }
 
     // =====================================================================
@@ -1961,6 +2051,7 @@ final class GameEngine
             'jarmuben'      => ($v = $this->vehicle($ctx)) ? $ctx->world->name($v) : null,
             'kijaratok'     => $exits,
             'targyak'       => $ctx->world->locationTree($locationId),
+            'latnivalok'    => array_column($this->details($ctx, false), 'name') ?: null,
             'szereplok'     => array_map(fn ($n) => ['nev' => $n['name'], 'leiras' => $n['description']], $ctx->npcs->present($ctx)) ?: null,
             'munkak'        => array_map(fn ($j) => $this->jobView($ctx, $j), $this->jobsHere($ctx)) ?: null,
             'kereskedes'    => array_map(fn ($l) => $ctx->npcs->tradeView($l, $ctx->world, $ctx, $this->locationNames($gameId)), $ctx->npcs->tradesHere($ctx)) ?: null,
@@ -2010,6 +2101,7 @@ final class GameEngine
                 $loc['kijaratok']
             ),
             'retegek'       => $this->layersFor($ctx),
+            'kozelkep'      => $ctx->closeup,
             'tuz'           => $ctx->fireAt($ctx->location) !== null,
             'jarmu'         => $loc['jarmuben'] ?? null,
             'vege'          => $ctx->state->end(),

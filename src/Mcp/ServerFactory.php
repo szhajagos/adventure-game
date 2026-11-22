@@ -38,6 +38,9 @@ final class ServerFactory
         - A tárgyakat a nevükkel add meg (ahogy a válaszban szerepelnek). Ha a válasz „lehetosegek” listát ad,
           kérdezd meg a játékost, melyikre gondolt.
         - A „reszletek” mezőben olyan apróságok lehetnek, amelyeket csak alapos vizsgálat derít ki – ezeket meséld el.
+        - A helyszín „latnivalok” listája a megnézhető részleteket sorolja (pl. hirdetés, műszerfal). Ha a játékos valamit
+          meg akar nézni, akár a listában van, akár nincs, hívd a megvizsgal eszközt a szavaival; az „amit_lat” mezőt meséld el.
+          Ha a panel közelképet mutat, nem kell részletesen leírni, ami a képen látszik, de a szöveg tartalmát mondd el.
 
         Test és idő:
         - Az idő csak a játékos lépéseivel telik. A „napszak” mező (hajnal, nappal, este, éjszaka) adja a hangulatot:
@@ -115,7 +118,7 @@ final class ServerFactory
         $panel  = ['ui' => new UiToolMeta(resourceUri: $panelUri, visibility: [ToolVisibility::Model, ToolVisibility::App])];
 
         return Server::builder()
-            ->setServerInfo('MCP Adventure', '0.9.0')
+            ->setServerInfo('MCP Adventure', '0.10.0')
             ->setInstructions(self::INSTRUCTIONS)
             ->enableExtension(new McpApps())
             ->addResource(
@@ -257,8 +260,8 @@ final class ServerFactory
                 name: 'megvizsgal',
                 meta: $panel,
                 title: 'Megvizsgál',
-                description: 'A játékos alaposan megnéz egy tárgyat (nála vagy a helyszínen). Néha rejtett részletekre derül fény, '
-                    .'például mi áll egy újságban, vagy mi van egy táskában.',
+                description: 'A játékos alaposan megnéz valamit: egy tárgyat (nála vagy a helyszínen), vagy a helyszín egy részletét '
+                    .'(pl. hirdetés a lámpaoszlopon, műszerfal, konyhapult). Néha rejtett részletekre derül fény; ha van közelkép, a panel megmutatja.',
                 annotations: new ToolAnnotations(title: 'Megvizsgál', readOnlyHint: false, destructiveHint: false),
                 inputSchema: self::schema(['targy' => ['string', 'A tárgy neve.']], ['targy']),
             )
