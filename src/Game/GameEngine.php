@@ -2185,12 +2185,16 @@ final class GameEngine
         if (is_string($flag)) {
             $variants[] = $flag;
         }
+        // Sorrend: kombinált (esos-ejszaka) → napszak (ejszaka) → időjárás (esos) → alapkép.
+        // A napszak előbb jön: éjjel egy esős nappali kép rosszabb, mint egy eső nélküli éjszakai.
         if ($minute !== null && $state?->weather() !== null) {
             $variants[] = $state->weather().'-'.Context::dayPartOf($minute); // pl. park_pad~esos-ejszaka.webp
-            $variants[] = (string) $state->weather();                         // pl. park_pad~esos.webp
         }
         if ($minute !== null) {
-            $variants[] = Context::dayPartOf($minute); // pl. park_pad~ejszaka.webp
+            $variants[] = Context::dayPartOf($minute);                        // pl. park_pad~ejszaka.webp
+        }
+        if ($state?->weather() !== null) {
+            $variants[] = (string) $state->weather();                         // pl. park_pad~esos.webp
         }
         foreach ($variants as $variant) {
             if (!preg_match('/^[a-z0-9_-]+$/', $variant) || $this->imageDir === null || $this->imageUrl === null) {

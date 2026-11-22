@@ -9,3 +9,9 @@ config/config.php
 deploy.zip
 frissites.zip
 kepek.zip
+
+# A játékok képei: tartalom, nem a motor része
+/assets/images/**/*.webp
+/assets/images/**/*.jpg
+/assets/images/**/*.jpeg
+/assets/images/**/*.png
